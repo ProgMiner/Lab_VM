@@ -1,7 +1,7 @@
 
 CXX = g++
 LD = g++
-CXXFLAGS = -std=c++17 -pedantic-errors -Wall -Werror -O2
+CXXFLAGS = -std=c++17 -pedantic-errors -Wall -Werror -O0 # -Ofast
 LDFLAGS =
 
 BUILDPATH = build
