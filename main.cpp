@@ -7,7 +7,8 @@
 
 
 static constexpr const uint64_t PAGE_SIZE = 4096; // bytes
-static constexpr const uint64_t HEAT_PATTERN_SIZE = 128 * 1024 / sizeof(void *);
+static constexpr const uint64_t HEAT_PATTERN_SIZE = 512 * 1024 / sizeof(void *);
+static constexpr const uint64_t REPEATS = 10000000;
 
 static void ** heat_pattern = nullptr;
 uint64_t counter = 0;
@@ -46,29 +47,28 @@ static void heat() {
 
     for (uint64_t i = 0; i < HEAT_PATTERN_SIZE; ++i) {
         ptr = *reinterpret_cast<void **>(ptr);
+        counter += *reinterpret_cast<uint64_t *>(ptr);
     }
-
-    counter += *reinterpret_cast<uint64_t *>(ptr);
 }
 
 template<typename W>
-static uint64_t measure_work(W work, uint64_t repeats = 10000000) {
+static uint64_t measure_work(W work) {
     const uint64_t start = rdtsc();
 
-    for (uint64_t i = 0; i < repeats; ++i) {
+    for (uint64_t i = 0; i < REPEATS; ++i) {
         work();
     }
 
     const uint64_t end = rdtsc();
 
-    return (end - start);
+    return end - start;
 }
 
 template<std::size_t SIZE>
-static uint64_t do_measure_cache_line_size() {
+static uint64_t measure_cache_size() {
     const std::size_t size = SIZE / sizeof(void *);
 
-    void ** const pattern = new void *[size];
+    void ** const pattern = new(std::align_val_t(PAGE_SIZE)) void *[size];
     generate_pattern(pattern, size);
 
     heat();
@@ -83,29 +83,44 @@ static uint64_t do_measure_cache_line_size() {
     return result;
 }
 
-template<std::size_t SIZE>
-static void measure_cache_line_size() {
-    std::cout << "Size\t" << SIZE
-              << " bytes:\t" << do_measure_cache_line_size<SIZE>()
-              << " ticks" << std::endl;
-}
-
-static void measure_cache_line_size() {
-    measure_cache_line_size<8>();
-    measure_cache_line_size<16>();
-    measure_cache_line_size<32>();
-    measure_cache_line_size<64>();
-    measure_cache_line_size<128>();
-    measure_cache_line_size<256>();
-    measure_cache_line_size<512>();
-    measure_cache_line_size<1024>();
-    measure_cache_line_size<2048>();
-    measure_cache_line_size<4096>();
+static uint64_t measure_cache_size() {
+#define CHECK(__x) do { \
+    const uint64_t _m = measure_cache_size<(__x)>(); \
+    if (_m > prev_measure + REPEATS) return __x; \
+    prev_measure = _m; \
+} while (0)
+    uint64_t prev_measure = measure_cache_size<8>();
+    CHECK(16);
+    CHECK(16);
+    CHECK(32);
+    CHECK(64);
+    CHECK(128);
+    CHECK(256);
+    CHECK(512);
+    CHECK(1024);
+    CHECK(2 * 1024);
+    CHECK(4 * 1024);
+    CHECK(8 * 1024);
+    CHECK(16 * 1024);
+    CHECK(32 * 1024);
+    CHECK(64 * 1024);
+    CHECK(128 * 1024);
+    CHECK(256 * 1024);
+    CHECK(512 * 1024);
+    CHECK(1024 * 1024);
+    CHECK(2 * 1024 * 1024);
+    CHECK(4 * 1024 * 1024);
+    CHECK(8 * 1024 * 1024);
+    CHECK(16 * 1024 * 1024);
+    CHECK(32 * 1024 * 1024);
+    CHECK(128 * 1024 * 1024);
+    return -1;
+#undef CHECK
 }
 
 int main() {
-    heat_pattern = new void *[HEAT_PATTERN_SIZE];
+    heat_pattern = new(std::align_val_t(PAGE_SIZE)) void *[HEAT_PATTERN_SIZE];
     generate_pattern(heat_pattern, HEAT_PATTERN_SIZE);
 
-    measure_cache_line_size();
+    std::cout << "Cache size: " << measure_cache_size() << " bytes" << std::endl;
 }
