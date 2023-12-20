@@ -80,13 +80,15 @@ static uint64_t measure_cache_size() {
 
     counter += *reinterpret_cast<uint64_t *>(ptr);
 
+    std::cout << "Size " << SIZE << " bytes: " << result << " repeats" << std::endl;
+
     return result;
 }
 
 static uint64_t measure_cache_size() {
 #define CHECK(__x) do { \
     const uint64_t _m = measure_cache_size<(__x)>(); \
-    if (_m > prev_measure + REPEATS) return __x; \
+    if (_m > prev_measure + REPEATS) /*return (__x) / 2*/; \
     prev_measure = _m; \
 } while (0)
     uint64_t prev_measure = measure_cache_size<8>();
