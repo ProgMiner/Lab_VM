@@ -7,15 +7,43 @@
 #include <random>
 
 
-static constexpr const uint64_t PAGE_SIZE = 4096; // bytes
-static constexpr const uint64_t HEAT_PATTERN_SIZE = 512 * 1024 / sizeof(void *);
+static constexpr const std::size_t PAGE_SIZE = 4096; // bytes
+static constexpr const std::size_t HEAT_PATTERN_SIZE = 512 * 1024 / sizeof(void *);
 static constexpr const uint64_t REPEATS = 10000000;
 
 static void ** heat_pattern = nullptr;
 uint64_t counter = 0;
 
+// to disable optimizer, do not change
+volatile std::size_t one = 1;
+
 static std::ofstream log_file { "./log.txt" };
 
+
+enum ord { NA = 0, LT, EQ, GT };
+
+
+static std::ostream & operator<<(std::ostream & os, const ord & o) {
+    switch (o) {
+    case NA:
+        os << "NA";
+        break;
+
+    case LT:
+        os << "LT";
+        break;
+
+    case EQ:
+        os << "EQ";
+        break;
+
+    case GT:
+        os << "GT";
+        break;
+    }
+
+    return os;
+}
 
 static __inline__ unsigned long long rdtsc(void) {
     unsigned hi, lo;
@@ -67,39 +95,6 @@ static uint64_t measure_work(W work) {
     return end - start;
 }
 
-// static uint64_t measure_random_pattern(std::size_t size_bytes) {
-//     const std::size_t size = size_bytes / sizeof(void *);
-//
-//     void ** const pattern = new(std::align_val_t(PAGE_SIZE)) void *[size];
-//     generate_pattern(pattern, size);
-//
-//     heat();
-//
-//     void * ptr = pattern;
-//     const uint64_t result = measure_work([&ptr] {
-//         ptr = *reinterpret_cast<void **>(ptr);
-//     });
-//
-//     counter += *reinterpret_cast<uint64_t *>(ptr);
-//     return result;
-// }
-
-// static uint64_t measure_cache_size() {
-//     uint64_t prev_measure = measure_random_pattern(8);
-//
-//     for (uint64_t size = 16; size < 64 * 1024 * 1024; size *= 2) {
-//         const uint64_t m = measure_random_pattern(size);
-//
-//         if (m > prev_measure + REPEATS) {
-//             return size / 2;
-//         }
-//
-//         prev_measure = m;
-//     }
-//
-//     throw std::logic_error { "cannot determine cache size" };
-// }
-
 static uint64_t measure_pattern(
     std::size_t stride_bytes,
     std::size_t spots
@@ -133,7 +128,7 @@ static uint64_t measure_pattern(
 }
 
 static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity(
-    uint64_t max_memory,
+    std::size_t max_memory,
     uint64_t max_associativity
 ) {
     std::vector<uint64_t> prev_jumps;
@@ -157,7 +152,7 @@ static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity
                          << "\tJump:\t" << jump
                          << std::endl;
 
-                if (jump) {
+                if (associativity > 1 && jump) {
                     jumps.push_back(associativity);
                 }
 
@@ -169,16 +164,124 @@ static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity
             }
 
             commit_jumps = std::move(jumps);
+            log_file << "Retry" << std::endl;
         }
 
-        if (commit_jumps == prev_jumps && commit_jumps.size() > 1) {
-            return { set_size / 2, commit_jumps[1] - 1 };
+        if (commit_jumps == prev_jumps && !commit_jumps.empty()) {
+            return { set_size / 2, commit_jumps[0] - 1 };
         }
 
         prev_jumps = std::move(commit_jumps);
     }
 
     throw std::logic_error { "cannot determine cache set stride and associativity" };
+}
+
+static std::size_t find_greater_time_spots(std::size_t stride, std::size_t max_spots) {
+    std::size_t l = 1, r = max_spots + 1;
+
+    const uint64_t first_time = measure_pattern(stride, one);
+    log_file << "First time: " << first_time << std::endl;
+
+    while (l + 1 < r) {
+        const std::size_t m = l + (r - l) / 2;
+
+        const uint64_t current_time = measure_pattern(stride, m);
+
+        log_file << "Spots:\t" << m
+                 << "\tTime:\t" << current_time
+                 << std::endl;
+
+        if (current_time < first_time + REPEATS) {
+            l = m;
+        } else {
+            r = m;
+        }
+    }
+
+    return r;
+}
+
+static std::size_t measure_cache_line_size(std::size_t max_line_size, std::size_t cache_size) {
+    bool eq_lt_reached = false;
+
+    for (std::size_t high_stride = 8; high_stride <= max_line_size; high_stride *= 2) {
+        log_file << "High stride: " << high_stride << std::endl;
+
+        const std::size_t expected_spots = cache_size / high_stride;
+        log_file << "Expected spots: " << expected_spots << std::endl;
+
+        const std::size_t max_spots = expected_spots + expected_spots / 2;
+
+        std::vector<ord> commit_ords;
+
+        while (true) {
+            std::vector<ord> ords;
+
+            for (std::size_t low_stride = 1; low_stride < high_stride; low_stride *= 2) {
+                log_file << "Low stride: " << low_stride << std::endl;
+
+                const std::size_t spots = find_greater_time_spots(high_stride + low_stride, max_spots);
+                const long double frac = static_cast<long double>(spots) / expected_spots;
+
+                log_file << "Fraction: " << frac << std::endl;
+
+                const ord result =
+                    spots > max_spots ? NA :
+                    frac < 0.9 ? LT :
+                    frac > 1.1 ? GT :
+                    EQ;
+
+                if (result == NA) {
+                    log_file << "Wasn't reached expected" << std::endl;
+                }
+
+                ords.push_back(result);
+            }
+
+            if (ords == commit_ords) {
+                break;
+            }
+
+            commit_ords = std::move(ords);
+            log_file << "Retry" << std::endl;
+        }
+
+        log_file << "Orderings: ";
+
+        for (ord o : commit_ords) {
+            log_file << o << ", ";
+        }
+
+        log_file << std::endl;
+
+        if (eq_lt_reached) {
+            bool lt = false, gt = false;
+
+            for (ord o : commit_ords) {
+                if (o == LT) {
+                    lt = true;
+                }
+
+                if (o == NA || o == GT) {
+                    gt = true;
+                }
+            }
+
+            if (!lt && gt) {
+                return high_stride / 2;
+            }
+        } else {
+            for (ord o : commit_ords) {
+                if (o == EQ || o == LT) {
+                    eq_lt_reached = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    throw std::logic_error { "cannot determine cache line size" };
 }
 
 int main() {
@@ -189,7 +292,13 @@ int main() {
 
     auto [cache_set_size, jump] = measure_cache_capacity_and_associativity(32 * 1024 * 1024, 16);
 
+    const std::size_t cache_size = cache_set_size * jump;
+
     std::cout << "Cache set size: " << cache_set_size << std::endl
               << "Associativity: " << jump << "-way" << std::endl
-              << "Cache size: " << cache_set_size * jump << std::endl;
+              << "Cache size: " << cache_size << std::endl;
+
+    const std::size_t cache_line_size = measure_cache_line_size(512, cache_size);
+
+    std::cout << "Cache line size: " << cache_line_size << std::endl;
 }
