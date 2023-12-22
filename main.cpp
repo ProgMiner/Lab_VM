@@ -131,7 +131,7 @@ static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity
     std::size_t max_memory,
     uint64_t max_associativity
 ) {
-    std::vector<uint64_t> prev_jumps;
+    std::size_t prev_min_jump = 0;
 
     for (std::size_t set_size = 16; set_size * max_associativity <= max_memory; set_size *= 2) {
         std::vector<uint64_t> commit_jumps;
@@ -167,11 +167,17 @@ static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity
             log_file << "Retry" << std::endl;
         }
 
-        if (commit_jumps == prev_jumps && !commit_jumps.empty()) {
-            return { set_size / 2, commit_jumps[0] - 1 };
-        }
+        if (!commit_jumps.empty()) {
+            const uint64_t min_jump = commit_jumps[0];
 
-        prev_jumps = std::move(commit_jumps);
+            if (min_jump == prev_min_jump) {
+                return { set_size / 2, commit_jumps[0] - 1 };
+            }
+
+            prev_min_jump = min_jump;
+        } else {
+            prev_min_jump = 0;
+        }
     }
 
     throw std::logic_error { "cannot determine cache set stride and associativity" };
