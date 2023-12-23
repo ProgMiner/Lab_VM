@@ -1,3 +1,4 @@
+#include <unordered_map>
 #include <algorithm>
 #include <iostream>
 #include <fstream>
@@ -127,22 +128,26 @@ static uint64_t measure_pattern(
     return result;
 }
 
-static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity(
+static std::vector<std::pair<std::size_t, uint64_t>> measure_cache_capacity_and_associativity(
     std::size_t max_memory,
     uint64_t max_associativity
 ) {
-    std::size_t prev_min_jump = 0;
+    std::unordered_map<uint64_t, std::vector<std::size_t>> assoc_to_stride;
+    std::vector<uint64_t> prev_jumps;
 
-    for (std::size_t set_size = 16; set_size * max_associativity <= max_memory; set_size *= 2) {
+    for (std::size_t set_size = 8; set_size * max_associativity <= max_memory; set_size *= 2) {
         std::vector<uint64_t> commit_jumps;
 
         while (true) {
             std::vector<uint64_t> jumps;
-            uint64_t prev_time = 0;
 
-            log_file << "Set size: " << set_size << std::endl;
+            uint64_t prev_time = measure_pattern(set_size, one);
 
-            for (uint64_t associativity = 1; associativity <= max_associativity; ++associativity) {
+            log_file << "Set size:\t" << set_size
+                     << "\tInitial time:\t" << prev_time
+                     << std::endl;
+
+            for (uint64_t associativity = 2; associativity <= max_associativity; ++associativity) {
                 const uint64_t current_time = measure_pattern(set_size, associativity);
 
                 const bool jump = current_time > prev_time + REPEATS;
@@ -152,7 +157,7 @@ static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity
                          << "\tJump:\t" << jump
                          << std::endl;
 
-                if (associativity > 1 && jump) {
+                if (jump) {
                     jumps.push_back(associativity);
                 }
 
@@ -167,20 +172,36 @@ static std::pair<std::size_t, uint64_t> measure_cache_capacity_and_associativity
             log_file << "Retry" << std::endl;
         }
 
-        if (!commit_jumps.empty()) {
-            const uint64_t min_jump = commit_jumps[0];
-
-            if (min_jump == prev_min_jump) {
-                return { set_size / 2, commit_jumps[0] - 1 };
-            }
-
-            prev_min_jump = min_jump;
-        } else {
-            prev_min_jump = 0;
+        for (uint64_t j : commit_jumps) {
+            assoc_to_stride[j].push_back(set_size);
         }
+
+        if (!commit_jumps.empty() && prev_jumps == commit_jumps) {
+            break;
+        }
+
+        prev_jumps = std::move(commit_jumps);
     }
 
-    throw std::logic_error { "cannot determine cache set stride and associativity" };
+    log_file << "Associativity to stride table:" << std::endl;
+
+    for (const auto & [assoc, strides] : assoc_to_stride) {
+        log_file << assoc << ":\t";
+
+        for (std::size_t stride : strides) {
+            log_file << stride << ", ";
+        }
+
+        log_file << std::endl;
+    }
+
+    std::vector<std::pair<std::size_t, uint64_t>> result;
+
+    for (uint64_t j : prev_jumps) {
+        result.emplace_back(assoc_to_stride[j][0], j - 1);
+    }
+
+    return result;
 }
 
 static std::size_t find_greater_time_spots(std::size_t stride, std::size_t max_spots) {
@@ -262,19 +283,15 @@ static std::size_t measure_cache_line_size(std::size_t max_line_size, std::size_
         log_file << std::endl;
 
         if (eq_lt_reached) {
-            bool lt = false, gt = false;
+            bool gt = false;
 
             for (ord o : commit_ords) {
-                if (o == LT) {
-                    lt = true;
-                }
-
                 if (o == NA || o == GT) {
                     gt = true;
                 }
             }
 
-            if (!lt && gt) {
+            if (gt) {
                 return high_stride / 2;
             }
         } else {
@@ -296,15 +313,19 @@ int main() {
 
     log_file << std::boolalpha;
 
-    auto [cache_set_size, jump] = measure_cache_capacity_and_associativity(32 * 1024 * 1024, 16);
+    auto detected = measure_cache_capacity_and_associativity(32 * 1024 * 1024, 24);
 
-    const std::size_t cache_size = cache_set_size * jump;
+    std::cout << "Detected entities:" << std::endl;
 
-    std::cout << "Cache set size: " << cache_set_size << std::endl
-              << "Associativity: " << jump << "-way" << std::endl
-              << "Cache size: " << cache_size << std::endl;
+    for (const auto & [stride, assoc] : detected) {
+        const std::size_t cache_size = stride * assoc;
 
-    const std::size_t cache_line_size = measure_cache_line_size(512, cache_size);
+        std::cout << " -\tStride: " << stride << std::endl
+                  << "\tAssociativity: " << assoc << "-way" << std::endl
+                  << "\tSize: " << stride * assoc << std::endl;
 
-    std::cout << "Cache line size: " << cache_line_size << std::endl;
+        const std::size_t cache_line_size = measure_cache_line_size(stride, cache_size);
+
+        std::cout << "\tCache line size: " << cache_line_size << std::endl;
+    }
 }
