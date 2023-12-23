@@ -10,9 +10,12 @@
 
 static constexpr const std::size_t PAGE_SIZE = 4096; // bytes
 static constexpr const std::size_t HEAT_PATTERN_SIZE = 512 * 1024 / sizeof(void *);
+static constexpr const std::size_t MAX_PATTERN_SIZE = 32 * 1024 * 1024 / sizeof(void *);
 static constexpr const uint64_t REPEATS = 10000000;
 
-static void ** heat_pattern = nullptr;
+static void * heat_pattern[HEAT_PATTERN_SIZE] alignas(PAGE_SIZE) = {};
+static void * pattern[MAX_PATTERN_SIZE] alignas(PAGE_SIZE) = {};
+
 uint64_t counter = 0;
 
 // to disable optimizer, do not change
@@ -93,11 +96,6 @@ static uint64_t measure_work(W work) {
 }
 
 static uint64_t measure_pattern(std::size_t stride_bytes, std::size_t spots) {
-    const std::size_t size_bytes = stride_bytes * spots;
-    const std::size_t size = size_bytes / sizeof(void *);
-
-    void ** const pattern = new(std::align_val_t(PAGE_SIZE)) void *[size];
-
     {
         const std::size_t stride = stride_bytes / sizeof(void *);
         void * ptr = &pattern[0];
@@ -313,12 +311,11 @@ static std::size_t measure_cache_line_size(std::size_t max_line_size, std::size_
 }
 
 int main() {
-    heat_pattern = new(std::align_val_t(PAGE_SIZE)) void *[HEAT_PATTERN_SIZE];
     generate_pattern(heat_pattern, HEAT_PATTERN_SIZE);
 
     log_file << std::boolalpha;
 
-    auto detected = measure_cache_capacity_and_associativity(32 * 1024 * 1024, 24);
+    auto detected = measure_cache_capacity_and_associativity(MAX_PATTERN_SIZE * sizeof(void *), 24);
 
     std::sort(detected.begin(), detected.end(), [] (const auto & a, const auto & b) {
         return a.first * a.second < b.first * b.second;
