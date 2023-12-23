@@ -21,15 +21,11 @@ volatile std::size_t one = 1;
 static std::ofstream log_file { "./log.txt" };
 
 
-enum ord { NA = 0, LT, EQ, GT };
+enum ord { LT = 0, EQ, GT };
 
 
 static std::ostream & operator<<(std::ostream & os, const ord & o) {
     switch (o) {
-    case NA:
-        os << "NA";
-        break;
-
     case LT:
         os << "LT";
         break;
@@ -96,10 +92,7 @@ static uint64_t measure_work(W work) {
     return end - start;
 }
 
-static uint64_t measure_pattern(
-    std::size_t stride_bytes,
-    std::size_t spots
-) {
+static uint64_t measure_pattern(std::size_t stride_bytes, std::size_t spots) {
     const std::size_t size_bytes = stride_bytes * spots;
     const std::size_t size = size_bytes / sizeof(void *);
 
@@ -128,6 +121,23 @@ static uint64_t measure_pattern(
     return result;
 }
 
+static uint64_t measure_pattern3(std::size_t stride_bytes, std::size_t spots) {
+    std::vector<uint64_t> results = {
+        measure_pattern(stride_bytes, spots),
+        measure_pattern(stride_bytes, spots),
+        measure_pattern(stride_bytes, spots),
+    };
+
+    std::sort(results.begin(), results.end());
+    results.pop_back();
+
+    return results[0] + (results[1] - results[0]) / 2;
+}
+
+static bool is_jump(uint64_t prev, uint64_t current) {
+    return static_cast<long double>(current) / prev > 1.15;
+}
+
 static std::vector<std::pair<std::size_t, uint64_t>> measure_cache_capacity_and_associativity(
     std::size_t max_memory,
     uint64_t max_associativity
@@ -141,16 +151,16 @@ static std::vector<std::pair<std::size_t, uint64_t>> measure_cache_capacity_and_
         while (true) {
             std::vector<uint64_t> jumps;
 
-            uint64_t prev_time = measure_pattern(set_size, one);
+            uint64_t prev_time = measure_pattern3(set_size, one);
 
             log_file << "Set size:\t" << set_size
                      << "\tInitial time:\t" << prev_time
                      << std::endl;
 
             for (uint64_t associativity = 2; associativity <= max_associativity; ++associativity) {
-                const uint64_t current_time = measure_pattern(set_size, associativity);
+                const uint64_t current_time = measure_pattern3(set_size, associativity);
 
-                const bool jump = current_time > prev_time + REPEATS;
+                const bool jump = is_jump(prev_time, current_time);
 
                 log_file << "Associativity:\t" << associativity
                          << "\tTime:\t" << current_time
@@ -161,7 +171,7 @@ static std::vector<std::pair<std::size_t, uint64_t>> measure_cache_capacity_and_
                     jumps.push_back(associativity);
                 }
 
-                prev_time = current_time;
+                prev_time = std::max(prev_time, current_time);
             }
 
             if (jumps == commit_jumps) {
@@ -207,22 +217,22 @@ static std::vector<std::pair<std::size_t, uint64_t>> measure_cache_capacity_and_
 static std::size_t find_greater_time_spots(std::size_t stride, std::size_t max_spots) {
     std::size_t l = 1, r = max_spots + 1;
 
-    const uint64_t first_time = measure_pattern(stride, one);
+    const uint64_t first_time = measure_pattern3(stride, one);
     log_file << "First time: " << first_time << std::endl;
 
     while (l + 1 < r) {
         const std::size_t m = l + (r - l) / 2;
 
-        const uint64_t current_time = measure_pattern(stride, m);
+        const uint64_t current_time = measure_pattern3(stride, m);
 
         log_file << "Spots:\t" << m
                  << "\tTime:\t" << current_time
                  << std::endl;
 
-        if (current_time < first_time + REPEATS) {
-            l = m;
-        } else {
+        if (is_jump(first_time, current_time)) {
             r = m;
+        } else {
+            l = m;
         }
     }
 
@@ -254,14 +264,9 @@ static std::size_t measure_cache_line_size(std::size_t max_line_size, std::size_
                 log_file << "Fraction: " << frac << std::endl;
 
                 const ord result =
-                    spots > max_spots ? NA :
                     frac < 0.9 ? LT :
                     frac > 1.1 ? GT :
                     EQ;
-
-                if (result == NA) {
-                    log_file << "Wasn't reached expected" << std::endl;
-                }
 
                 ords.push_back(result);
             }
@@ -286,7 +291,7 @@ static std::size_t measure_cache_line_size(std::size_t max_line_size, std::size_
             bool gt = false;
 
             for (ord o : commit_ords) {
-                if (o == NA || o == GT) {
+                if (o == GT) {
                     gt = true;
                 }
             }
@@ -315,17 +320,30 @@ int main() {
 
     auto detected = measure_cache_capacity_and_associativity(32 * 1024 * 1024, 24);
 
-    std::cout << "Detected entities:" << std::endl;
+    std::sort(detected.begin(), detected.end(), [] (const auto & a, const auto & b) {
+        return a.first * a.second < b.first * b.second;
+    });
+
+    log_file << "Detected entities:" << std::endl;
 
     for (const auto & [stride, assoc] : detected) {
-        const std::size_t cache_size = stride * assoc;
-
-        std::cout << " -\tStride: " << stride << std::endl
-                  << "\tAssociativity: " << assoc << "-way" << std::endl
-                  << "\tSize: " << stride * assoc << std::endl;
-
-        const std::size_t cache_line_size = measure_cache_line_size(stride, cache_size);
-
-        std::cout << "\tCache line size: " << cache_line_size << std::endl;
+        log_file << " -\tStride: " << stride << std::endl
+                 << "\tAssociativity: " << assoc << "-way" << std::endl
+                 << "\tSize: " << stride * assoc << std::endl;
     }
+
+    if (detected.empty()) {
+        std::cout << "No one entity detected" << std::endl;
+        return 0;
+    }
+
+    auto [l1_stride, l1_assoc] = detected[0];
+    const std::size_t l1_size = l1_stride * l1_assoc;
+
+    std::cout << "Cache set: " << l1_stride << std::endl
+              << "Associativity: " << l1_assoc << "-way" << std::endl
+              << "Size: " << l1_size << std::endl;
+
+    const std::size_t l1_line_size = measure_cache_line_size(l1_stride, l1_size);
+    std::cout << "Cache line size: " << l1_line_size << std::endl;
 }
