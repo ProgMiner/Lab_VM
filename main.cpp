@@ -3,6 +3,7 @@
 #include <sstream>
 #include <cstdint>
 #include <memory>
+#include <stack>
 
 
 /* Bytecode file layout
@@ -51,19 +52,19 @@ struct bytecode_contents {
 // instruction code
 enum IC {
 
-    BINOP_add       = 0x00, // BINOP +
-    BINOP_sub       = 0x01, // BINOP -
-    BINOP_mul       = 0x02, // BINOP *
-    BINOP_div       = 0x03, // BINOP /
-    BINOP_rem       = 0x04, // BINOP %
-    BINOP_lt        = 0x05, // BINOP <
-    BINOP_le        = 0x06, // BINOP <=
-    BINOP_gt        = 0x07, // BINOP >
-    BINOP_ge        = 0x08, // BINOP >=
-    BINOP_eq        = 0x09, // BINOP ==
-    BINOP_ne        = 0x0A, // BINOP !=
-    BINOP_and       = 0x0B, // BINOP &&
-    BINOP_or        = 0x0C, // BINOP !!
+    BINOP_add       = 0x01, // BINOP +
+    BINOP_sub       = 0x02, // BINOP -
+    BINOP_mul       = 0x03, // BINOP *
+    BINOP_div       = 0x04, // BINOP /
+    BINOP_rem       = 0x05, // BINOP %
+    BINOP_lt        = 0x06, // BINOP <
+    BINOP_le        = 0x07, // BINOP <=
+    BINOP_gt        = 0x08, // BINOP >
+    BINOP_ge        = 0x09, // BINOP >=
+    BINOP_eq        = 0x0A, // BINOP ==
+    BINOP_ne        = 0x0B, // BINOP !=
+    BINOP_and       = 0x0C, // BINOP &&
+    BINOP_or        = 0x0D, // BINOP !!
     CONST           = 0x10, // CONST, int
     STRING          = 0x11, // STRING, string
     SEXP            = 0x12, // SEXP, string, int
@@ -113,6 +114,19 @@ enum IC {
     CALL_Barray     = 0x74, // CALL Barray, int
 };
 
+struct activation {
+
+    const void * const * return_ptr;
+
+    void * & local(std::size_t idx) {
+        return *(
+            reinterpret_cast<void **>(reinterpret_cast<uint8_t *>(this) + sizeof(activation))
+                + idx
+        );
+    }
+};
+
+
 static std::ofstream log_file { "./log.txt" };
 
 
@@ -151,7 +165,23 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
     return bytecode;
 }
 
+static activation * create_activation(const void * const * return_ptr, std::size_t locals) {
+    auto result = reinterpret_cast<activation *>(
+        // zero-initialized
+        new uint8_t[sizeof(activation) + sizeof(void *) * locals] {}
+    );
+
+    result->return_ptr = return_ptr;
+    return result;
+}
+
 static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
+#define TO_FIXNUM(__x) static_cast<int32_t>(((static_cast<uint32_t>(__x) << 1) + 1) & UINT32_MAX)
+#define FROM_FIXNUM(__x) static_cast<int32_t>(static_cast<uint32_t>(__x) >> 1)
+#define IS_FIXNUM(__x) (((__x) & 1) != 0)
+
+#define INVALID static_cast<uint32_t>(-1)
+
     std::shared_ptr<const void * []> converted {
         new const void * [bytecode->code_size],
         std::default_delete<const void * []> {},
@@ -195,16 +225,16 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         bytecode_ptrs[IC::SWAP] = &&I_SWAP;
         bytecode_ptrs[IC::ELEM] = &&I_ELEM;
         bytecode_ptrs[IC::LD_G] = &&I_LD_G;
-        bytecode_ptrs[IC::LD_L] = &&I_LD_L;
-        bytecode_ptrs[IC::LD_A] = &&I_LD_A;
+        bytecode_ptrs[IC::LD_L] = &&I_LD_AL;
+        bytecode_ptrs[IC::LD_A] = &&I_LD_AL;
         bytecode_ptrs[IC::LD_C] = &&I_LD_C;
         bytecode_ptrs[IC::LDA_G] = &&I_LDA_G;
-        bytecode_ptrs[IC::LDA_L] = &&I_LDA_L;
-        bytecode_ptrs[IC::LDA_A] = &&I_LDA_A;
+        bytecode_ptrs[IC::LDA_L] = &&I_LDA_AL;
+        bytecode_ptrs[IC::LDA_A] = &&I_LDA_AL;
         bytecode_ptrs[IC::LDA_C] = &&I_LDA_C;
         bytecode_ptrs[IC::ST_G] = &&I_ST_G;
-        bytecode_ptrs[IC::ST_L] = &&I_ST_L;
-        bytecode_ptrs[IC::ST_A] = &&I_ST_A;
+        bytecode_ptrs[IC::ST_L] = &&I_ST_AL;
+        bytecode_ptrs[IC::ST_A] = &&I_ST_AL;
         bytecode_ptrs[IC::ST_C] = &&I_ST_C;
         bytecode_ptrs[IC::CJMPz] = &&I_CJMPz;
         bytecode_ptrs[IC::CJMPnz] = &&I_CJMPnz;
@@ -229,13 +259,20 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         bytecode_ptrs[IC::CALL_Lstring] = &&I_CALL_Lstring;
         bytecode_ptrs[IC::CALL_Barray] = &&I_CALL_Barray;
 
+        converted[0] = &&finish;
+
+        std::size_t current_function_idx = INVALID;
+        std::size_t current_function_args = 0;
+        std::size_t current_function_locals = 0;
+
         std::size_t bytecode_idx = 0;
-        std::size_t converted_idx = 0;
+        std::size_t converted_idx = 1;
         while (bytecode_idx < bytecode->code_size) {
             const IC code = static_cast<IC>(bytecode->code_ptr[bytecode_idx++]);
 
-            log_file << std::hex << bytecode_idx - 1
-                     << ". " << code << std::dec
+            log_file << "0x" << std::hex << bytecode_idx - 1
+                     << " (0x" << converted_idx
+                     << "). 0x" << code << std::dec
                      << std::endl;
 
             if ((0xF0 & code) == 0xF0) {
@@ -247,6 +284,20 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 continue;
             }
 
+            if (code == IC::BEGIN || code == IC::CBEGIN) {
+                current_function_idx = converted_idx;
+                current_function_args = *reinterpret_cast<const uint32_t *>(
+                    bytecode->code_ptr + bytecode_idx
+                );
+                current_function_locals = *reinterpret_cast<const uint32_t *>(
+                    bytecode->code_ptr + bytecode_idx + 4
+                );
+            } else if (code == IC::END) {
+                current_function_idx = INVALID;
+                current_function_args = 0;
+                current_function_locals = 0;
+            }
+
             const void * bytecode_ptr = bytecode_ptrs[code];
             if (!bytecode_ptr) {
                 bytecode_ptr = &&I_unsupported;
@@ -254,24 +305,28 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             converted[converted_idx++] = bytecode_ptr;
 
+            // TODO check same stack depth on labels
+            // TODO check negative stack depth
+            // TODO check is BEGIN after CALL
+            // TODO check is CBEGIN in CLOSURE
+
             switch (code) {
 
             // plain int arg
-            case IC::CONST:
-            case IC::CALLC:
-            case IC::ARRAY:
-            case IC::CALL_Barray: {
-                const uint32_t n =
-                    *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
+            case CONST:
+            case CALLC:
+            case ARRAY:
+            case CALL_Barray: {
+                converted[converted_idx++] = reinterpret_cast<void *>(TO_FIXNUM(
+                    *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx)
+                ));
 
-                // fixnum
-                converted[converted_idx++] = reinterpret_cast<void *>(((n << 1) + 1) & UINT32_MAX);
                 bytecode_idx += 4;
                 break;
             }
 
             // string arg
-            case IC::STRING:
+            case STRING:
                 converted[converted_idx++] = bytecode->string_ptr
                     + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
 
@@ -279,9 +334,11 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
 
             // offset in code arg
-            case IC::JMP:
-            case IC::CJMPz:
-            case IC::CJMPnz:
+            case JMP:
+            case CJMPz:
+            case CJMPnz:
+                // TODO convert bytecode offset to converted offset
+
                 converted[converted_idx++] = converted_base
                     + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
 
@@ -289,43 +346,83 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
 
             // G(int) arg
-            case IC::LD_G:
-            case IC::LDA_G:
-            case IC::ST_G:
+            case LD_G:
+            case LDA_G:
+            case ST_G:
                 converted[converted_idx++] = global_area_base
                     + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
 
                 bytecode_idx += 4;
                 break;
 
-            // TODO L(int) arg
-            // TODO A(int) arg
+            // A(int) arg
+            case LD_A:
+            case LDA_A:
+            case ST_A: {
+                if (current_function_idx == INVALID) {
+                    throw std::invalid_argument { "cannot use arguments outside of function" };
+                }
+
+                const std::size_t idx = *reinterpret_cast<const uint32_t *>(
+                    bytecode->code_ptr + bytecode_idx
+                );
+
+                bytecode_idx += 4;
+
+                if (idx >= current_function_args) {
+                    throw std::invalid_argument {
+                        "argument index is greater than number of arguments"
+                    };
+                }
+
+                converted[converted_idx++] = reinterpret_cast<void *>(idx);
+                break;
+            }
+
+            // L(int) arg
+            case LD_L:
+            case LDA_L:
+            case ST_L: {
+                if (current_function_idx == INVALID) {
+                    throw std::invalid_argument { "cannot use locals outside of function" };
+                }
+
+                const std::size_t idx = *reinterpret_cast<const uint32_t *>(
+                    bytecode->code_ptr + bytecode_idx
+                );
+
+                bytecode_idx += 4;
+
+                if (idx >= current_function_locals) {
+                    throw std::invalid_argument {
+                        "local index is greater than number of locals"
+                    };
+                }
+
+                converted[converted_idx++] = reinterpret_cast<void *>(idx + current_function_args);
+                break;
+            }
+
             // TODO C(int) arg
-            case IC::LD_L:
-            case IC::LD_A:
-            case IC::LD_C:
-            case IC::LDA_L:
-            case IC::LDA_A:
-            case IC::LDA_C:
-            case IC::ST_L:
-            case IC::ST_A:
-            case IC::ST_C:
+            case LD_C:
+            case LDA_C:
+            case ST_C:
                 bytecode_idx += 4;
                 break;
 
             // 2 args
-            case IC::SEXP:
-            case IC::BEGIN:
-            case IC::CBEGIN:
-            case IC::CALL:
-            case IC::TAG:
-            case IC::FAIL:
+            case SEXP:
+            case BEGIN:
+            case CBEGIN:
+            case CALL:
+            case TAG:
+            case FAIL:
                 converted[converted_idx++] = bytecode->code_ptr + bytecode_idx;
                 bytecode_idx += 8;
                 break;
 
             // CLOSURE
-            case IC::CLOSURE: {
+            case CLOSURE: {
                 converted[converted_idx++] = bytecode->code_ptr + bytecode_idx;
 
                 const std::size_t n = *reinterpret_cast<const uint32_t *>(
@@ -350,8 +447,20 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
 #define NEXT do { goto **ip++; } while (false)
 
-    const void * const * ip = converted_base;
+    const void * const * ip = converted_base + 1;
+    const void * const * rip = converted_base; // TODO set in CALL and CALLC
+    activation * current_activation = nullptr;
+
+    std::stack<activation *> activations;
+    std::stack<void *> stack;
+    stack.push(0);
+    stack.push(0);
+    stack.push(0);
+
     NEXT;
+
+finish:
+    return;
 
 I_BINOP_add:
     goto I_unsupported;
@@ -359,8 +468,16 @@ I_BINOP_add:
 I_BINOP_sub:
     goto I_unsupported;
 
-I_BINOP_mul:
-    goto I_unsupported;
+I_BINOP_mul: {
+    const int32_t b = FROM_FIXNUM(*reinterpret_cast<int32_t *>(&stack.top()));
+    stack.pop();
+
+    const int32_t a = FROM_FIXNUM(*reinterpret_cast<int32_t *>(&stack.top()));
+    stack.pop();
+
+    stack.push(reinterpret_cast<void *>(TO_FIXNUM(a * b)));
+    NEXT;
+}
 
 I_BINOP_div:
     goto I_unsupported;
@@ -392,8 +509,11 @@ I_BINOP_and:
 I_BINOP_or:
     goto I_unsupported;
 
-I_CONST:
-    goto I_unsupported;
+I_CONST: {
+    const uint32_t imm = *reinterpret_cast<const uint32_t *>(ip++);
+    stack.push(reinterpret_cast<void *>(imm));
+    NEXT;
+}
 
 I_STRING:
     goto I_unsupported;
@@ -410,14 +530,22 @@ I_STA:
 I_JMP:
     goto I_unsupported;
 
-I_END:
-    goto I_unsupported;
+I_END: {
+    activations.pop();
+    ip = current_activation->return_ptr;
+
+    delete[] reinterpret_cast<uint8_t*>(current_activation);
+
+    current_activation = activations.empty() ? nullptr : activations.top();
+    NEXT;
+}
 
 I_RET:
     goto I_unsupported;
 
 I_DROP:
-    goto I_unsupported;
+    stack.pop();
+    NEXT;
 
 I_DUP:
     goto I_unsupported;
@@ -428,13 +556,13 @@ I_SWAP:
 I_ELEM:
     goto I_unsupported;
 
-I_LD_G:
-    goto I_unsupported;
+I_LD_G: {
+    auto * const imm = const_cast<void **>(reinterpret_cast<void * const *>(*ip++));
+    stack.push(*imm);
+    NEXT;
+}
 
-I_LD_L:
-    goto I_unsupported;
-
-I_LD_A:
+I_LD_AL:
     goto I_unsupported;
 
 I_LD_C:
@@ -443,22 +571,19 @@ I_LD_C:
 I_LDA_G:
     goto I_unsupported;
 
-I_LDA_L:
-    goto I_unsupported;
-
-I_LDA_A:
+I_LDA_AL:
     goto I_unsupported;
 
 I_LDA_C:
     goto I_unsupported;
 
-I_ST_G:
-    goto I_unsupported;
+I_ST_G: {
+    auto * const imm = const_cast<void **>(reinterpret_cast<void * const *>(*ip++));
+    *imm = stack.top();
+    NEXT;
+}
 
-I_ST_L:
-    goto I_unsupported;
-
-I_ST_A:
+I_ST_AL:
     goto I_unsupported;
 
 I_ST_C:
@@ -470,8 +595,20 @@ I_CJMPz:
 I_CJMPnz:
     goto I_unsupported;
 
-I_BEGIN:
-    goto I_unsupported;
+I_BEGIN: {
+    auto * const imm = reinterpret_cast<const uint32_t *>(*ip++);
+    auto * const act = create_activation(rip, imm[0] + imm[1]);
+    rip = nullptr;
+
+    for (std::size_t i = imm[0]; i > 0; --i) {
+        act->local(i - 1) = stack.top();
+        stack.pop();
+    }
+
+    current_activation = act;
+    activations.push(act);
+    NEXT;
+}
 
 I_CBEGIN:
     goto I_unsupported;
@@ -515,11 +652,24 @@ I_PATT_val:
 I_PATT_fun:
     goto I_unsupported;
 
-I_CALL_Lread:
-    goto I_unsupported;
+I_CALL_Lread: {
+    std::cout << "> ";
+    std::cout.flush();
 
-I_CALL_Lwrite:
-    goto I_unsupported;
+    int32_t value;
+    std::cin >> value;
+
+    stack.push(reinterpret_cast<void *>(TO_FIXNUM(value)));
+    NEXT;
+}
+
+I_CALL_Lwrite: {
+    const int32_t value = FROM_FIXNUM(*reinterpret_cast<int32_t *>(&stack.top()));
+    stack.pop();
+
+    std::cout << value << std::endl;
+    NEXT;
+}
 
 I_CALL_Llength:
     goto I_unsupported;
@@ -533,9 +683,14 @@ I_CALL_Barray:
 I_unsupported: // unsupported instruction
     std::ostringstream os;
 
-    os << "Unsupported instruction at " << std::hex << ip - converted_base - 1;
+    os << "Unsupported instruction at 0x" << std::hex << ip - converted_base - 1;
     throw std::invalid_argument { os.str() };
+
 #undef NEXT
+#undef INVALID
+#undef IS_FIXNUM
+#undef TO_FIXNUM
+#undef FROM_FIXNUM
 }
 
 int main(int argc, char * argv[]) {
@@ -555,7 +710,7 @@ int main(int argc, char * argv[]) {
         auto public_entry = bytecode->public_ptr[i];
 
         log_file << bytecode->string_ptr + public_entry.name_pos
-                 << " -> " << reinterpret_cast<void *>(public_entry.code_pos)
+                 << " -> 0x" << std::hex << public_entry.code_pos << std::dec
                  << std::endl;
     }
 
