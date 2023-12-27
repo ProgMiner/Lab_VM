@@ -181,6 +181,18 @@ static int32_t from_fixnum(uint32_t x) noexcept {
 //     return (x & 1) != 0;
 // }
 
+template<typename T>
+static T read_from_bytes(const uint8_t * buffer, std::size_t & idx) {
+    auto result = *reinterpret_cast<const T *>(buffer + idx);
+    idx += sizeof(T);
+    return result;
+}
+
+template<typename T>
+static T read_from_bytes(const uint8_t * buffer) {
+    return *reinterpret_cast<const T *>(buffer);
+}
+
 static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
     std::ifstream bytecode_file { filename, std::ios::in | std::ios::binary | std::ios::ate };
 
@@ -220,8 +232,6 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
 
     return bytecode;
 }
-
-// TODO make static method of activation, add "drop"
 
 static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     std::shared_ptr<CC[]> converted {
@@ -326,12 +336,8 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             if (code == IC::BEGIN || code == IC::CBEGIN) {
                 current_function_idx = converted_idx;
-                current_function_args = *reinterpret_cast<const uint32_t *>(
-                    bytecode->code_ptr + bytecode_idx
-                );
-                current_function_locals = *reinterpret_cast<const uint32_t *>(
-                    bytecode->code_ptr + bytecode_idx + 4
-                );
+                current_function_args = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx);
+                current_function_locals = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx + 4);
             } else if (code == IC::END) {
                 current_function_idx = UINT32_MAX;
                 current_function_args = 0;
@@ -359,20 +365,17 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case CALLC:
             case ARRAY:
             case CALL_Barray: {
-                converted[converted_idx++].fixnum = to_fixnum(
-                    *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx)
-                );
+                converted[converted_idx++].fixnum =
+                    to_fixnum(read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx));
 
-                bytecode_idx += 4;
                 break;
             }
 
             // string arg
             case STRING:
                 converted[converted_idx++].string = bytecode->string_ptr
-                    + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
+                    + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
 
-                bytecode_idx += 4;
                 break;
 
             // offset in code arg
@@ -382,9 +385,8 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 // TODO convert bytecode offset to converted offset
 
                 converted[converted_idx++].code = converted_base
-                    + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
+                    + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
 
-                bytecode_idx += 4;
                 break;
 
             // G(int) arg
@@ -392,9 +394,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case LDA_G:
             case ST_G:
                 converted[converted_idx++].global = global_area_base
-                    + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
-
-                bytecode_idx += 4;
+                    + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
                 break;
 
             // A(int) arg
@@ -405,11 +405,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     throw std::invalid_argument { "cannot use arguments outside of function" };
                 }
 
-                const std::size_t idx = *reinterpret_cast<const uint32_t *>(
-                    bytecode->code_ptr + bytecode_idx
-                );
-
-                bytecode_idx += 4;
+                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
 
                 if (idx >= current_function_args) {
                     throw std::invalid_argument {
@@ -429,11 +425,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     throw std::invalid_argument { "cannot use locals outside of function" };
                 }
 
-                const std::size_t idx = *reinterpret_cast<const uint32_t *>(
-                    bytecode->code_ptr + bytecode_idx
-                );
-
-                bytecode_idx += 4;
+                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
 
                 if (idx >= current_function_locals) {
                     throw std::invalid_argument {
@@ -467,7 +459,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case CLOSURE: {
                 converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
 
-                const std::size_t n = *reinterpret_cast<const uint32_t *>(
+                const std::size_t n = read_from_bytes<uint32_t>(
                     bytecode->code_ptr + bytecode_idx + 4
                 );
 
@@ -511,10 +503,10 @@ I_BINOP_sub:
     goto I_unsupported;
 
 I_BINOP_mul: {
-    const int32_t b = from_fixnum(*reinterpret_cast<int32_t *>(&stack.top()));
+    const int32_t b = from_fixnum(stack.top().fixnum);
     stack.pop();
 
-    const int32_t a = from_fixnum(*reinterpret_cast<int32_t *>(&stack.top()));
+    const int32_t a = from_fixnum(stack.top().fixnum);
     stack.pop();
 
     stack.emplace(to_fixnum(a * b));
@@ -552,8 +544,7 @@ I_BINOP_or:
     goto I_unsupported;
 
 I_CONST: {
-    const uint32_t imm = *reinterpret_cast<const uint32_t *>(ip++);
-    stack.emplace(imm);
+    stack.emplace((ip++)->fixnum);
     NEXT;
 }
 
@@ -574,7 +565,7 @@ I_JMP:
 
 I_END: {
     activations.pop();
-    ip = reinterpret_cast<const CC *>(current_activation->return_ptr);
+    ip = current_activation->return_ptr;
 
     activation::drop(current_activation);
 
@@ -706,7 +697,7 @@ I_CALL_Lread: {
 }
 
 I_CALL_Lwrite: {
-    const int32_t value = from_fixnum(*reinterpret_cast<int32_t *>(&stack.top()));
+    const int32_t value = from_fixnum(stack.top().fixnum);
     stack.pop();
 
     std::cout << value << std::endl;
