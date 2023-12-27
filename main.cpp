@@ -132,6 +132,11 @@ static std::ofstream log_file { "./log.txt" };
 
 static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
     std::ifstream bytecode_file { filename, std::ios::in | std::ios::binary | std::ios::ate };
+
+    if (!bytecode_file) {
+        throw std::invalid_argument { "Cannot open file" };
+    }
+
     const std::size_t bytecode_file_size = bytecode_file.tellg();
     bytecode_file.seekg(0);
 
@@ -165,6 +170,7 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
     return bytecode;
 }
 
+// TODO make static method of activation, add "drop"
 static activation * create_activation(const void * const * return_ptr, std::size_t locals) {
     auto result = reinterpret_cast<activation *>(
         // zero-initialized
@@ -309,6 +315,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check negative stack depth
             // TODO check is BEGIN after CALL
             // TODO check is CBEGIN in CLOSURE
+            // TODO check labels accessed from same function
 
             switch (code) {
 
