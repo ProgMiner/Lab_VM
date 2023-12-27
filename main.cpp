@@ -170,11 +170,11 @@ static std::ofstream log_file { "./log.txt" };
 
 
 static uint32_t to_fixnum(int32_t x) noexcept {
-    return ((static_cast<uint32_t>(x) << 1) + 1) & UINT32_MAX;
+    return static_cast<uint32_t>(x << 1) | 1;
 }
 
 static int32_t from_fixnum(uint32_t x) noexcept {
-    return static_cast<int32_t>(x >> 1);
+    return static_cast<int32_t>(x) >> 1;
 }
 
 // static bool is_fixnum(uint32_t x) noexcept {
@@ -182,14 +182,14 @@ static int32_t from_fixnum(uint32_t x) noexcept {
 // }
 
 template<typename T>
-static T read_from_bytes(const uint8_t * buffer, std::size_t & idx) {
-    auto result = *reinterpret_cast<const T *>(buffer + idx);
+static const T & read_from_bytes(const uint8_t * buffer, std::size_t & idx) {
+    const T & result = *reinterpret_cast<const T *>(buffer + idx);
     idx += sizeof(T);
     return result;
 }
 
 template<typename T>
-static T read_from_bytes(const uint8_t * buffer) {
+static const T & read_from_bytes(const uint8_t * buffer) {
     return *reinterpret_cast<const T *>(buffer);
 }
 
@@ -364,18 +364,15 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case CONST:
             case CALLC:
             case ARRAY:
-            case CALL_Barray: {
+            case CALL_Barray:
                 converted[converted_idx++].fixnum =
                     to_fixnum(read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx));
-
                 break;
-            }
 
             // string arg
             case STRING:
                 converted[converted_idx++].string = bytecode->string_ptr
                     + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-
                 break;
 
             // offset in code arg
@@ -386,7 +383,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
                 converted[converted_idx++].code = converted_base
                     + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-
                 break;
 
             // G(int) arg
@@ -406,7 +402,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 }
 
                 const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-
                 if (idx >= current_function_args) {
                     throw std::invalid_argument {
                         "argument index is greater than number of arguments"
@@ -426,7 +421,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 }
 
                 const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-
                 if (idx >= current_function_locals) {
                     throw std::invalid_argument {
                         "local index is greater than number of locals"
@@ -487,20 +481,36 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
     std::stack<activation *> activations;
     std::stack<value> stack;
-    stack.emplace();
-    stack.emplace();
-    stack.emplace();
+    stack.emplace(); // argc
+    stack.emplace(); // argv
+    stack.emplace(); // envp (failsafe)
 
     NEXT;
 
 finish:
     return;
 
-I_BINOP_add:
-    goto I_unsupported;
+I_BINOP_add: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_BINOP_sub:
-    goto I_unsupported;
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a + b));
+    NEXT;
+}
+
+I_BINOP_sub: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a - b));
+    NEXT;
+}
 
 I_BINOP_mul: {
     const int32_t b = from_fixnum(stack.top().fixnum);
@@ -513,35 +523,115 @@ I_BINOP_mul: {
     NEXT;
 }
 
-I_BINOP_div:
-    goto I_unsupported;
+I_BINOP_div: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_BINOP_rem:
-    goto I_unsupported;
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_BINOP_lt:
-    goto I_unsupported;
+    stack.emplace(to_fixnum(a / b));
+    NEXT;
+}
 
-I_BINOP_le:
-    goto I_unsupported;
+I_BINOP_rem: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_BINOP_gt:
-    goto I_unsupported;
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_BINOP_ge:
-    goto I_unsupported;
+    stack.emplace(to_fixnum(a % b));
+    NEXT;
+}
 
-I_BINOP_eq:
-    goto I_unsupported;
+I_BINOP_lt: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_BINOP_ne:
-    goto I_unsupported;
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_BINOP_and:
-    goto I_unsupported;
+    stack.emplace(to_fixnum(a < b));
+    NEXT;
+}
 
-I_BINOP_or:
-    goto I_unsupported;
+I_BINOP_le: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a <= b));
+    NEXT;
+}
+
+I_BINOP_gt: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a > b));
+    NEXT;
+}
+
+I_BINOP_ge: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a >= b));
+    NEXT;
+}
+
+I_BINOP_eq: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a == b));
+    NEXT;
+}
+
+I_BINOP_ne: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a != b));
+    NEXT;
+}
+
+I_BINOP_and: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a && b));
+    NEXT;
+}
+
+I_BINOP_or: {
+    const int32_t b = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    const int32_t a = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    stack.emplace(to_fixnum(a || b));
+    NEXT;
+}
 
 I_CONST: {
     stack.emplace((ip++)->fixnum);
@@ -629,7 +719,7 @@ I_CJMPnz:
     goto I_unsupported;
 
 I_BEGIN: {
-    auto * const imm = reinterpret_cast<const uint32_t *>((ip++)->args);
+    auto imm = read_from_bytes<uint32_t[2]>((ip++)->args);
     auto * const act = activation::create(rip, imm[0] + imm[1]);
     rip = nullptr;
 
@@ -701,6 +791,8 @@ I_CALL_Lwrite: {
     stack.pop();
 
     std::cout << value << std::endl;
+
+    stack.emplace();
     NEXT;
 }
 
