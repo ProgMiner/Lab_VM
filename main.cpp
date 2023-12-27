@@ -114,21 +114,72 @@ enum IC {
     CALL_Barray     = 0x74, // CALL Barray, int
 };
 
+union value {
+
+    uint32_t fixnum;
+    value ** var;
+
+    value() noexcept = default;
+    explicit value(uint32_t fixnum) noexcept: fixnum(fixnum) {}
+};
+
+// converted code
+union CC {
+
+    const void * interpreter;
+
+    uint32_t fixnum;
+    const char * string;
+    const CC * code;
+    value * global;
+    uint32_t index;
+    const uint8_t * args;
+};
+
+static_assert(sizeof(value) == sizeof(void *));
+static_assert(sizeof(CC) == sizeof(void *));
+
 struct activation {
 
-    const void * const * return_ptr;
+    const CC * return_ptr;
 
-    void * & local(std::size_t idx) {
+    value & local(std::size_t idx) {
         return *(
-            reinterpret_cast<void **>(reinterpret_cast<uint8_t *>(this) + sizeof(activation))
+            reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this) + sizeof(activation))
                 + idx
         );
+    }
+
+    static activation * create(const CC * return_ptr, std::size_t locals) {
+        auto result = reinterpret_cast<activation *>(
+            // zero-initialized
+            new uint8_t[sizeof(activation) + sizeof(value) * locals] {}
+        );
+
+        result->return_ptr = return_ptr;
+        return result;
+    }
+
+    static void drop(activation * act) {
+        delete[] reinterpret_cast<uint8_t *>(act);
     }
 };
 
 
 static std::ofstream log_file { "./log.txt" };
 
+
+static uint32_t to_fixnum(int32_t x) noexcept {
+    return ((static_cast<uint32_t>(x) << 1) + 1) & UINT32_MAX;
+}
+
+static int32_t from_fixnum(uint32_t x) noexcept {
+    return static_cast<int32_t>(x >> 1);
+}
+
+// static bool is_fixnum(uint32_t x) noexcept {
+//     return (x & 1) != 0;
+// }
 
 static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
     std::ifstream bytecode_file { filename, std::ios::in | std::ios::binary | std::ios::ate };
@@ -171,103 +222,86 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
 }
 
 // TODO make static method of activation, add "drop"
-static activation * create_activation(const void * const * return_ptr, std::size_t locals) {
-    auto result = reinterpret_cast<activation *>(
-        // zero-initialized
-        new uint8_t[sizeof(activation) + sizeof(void *) * locals] {}
-    );
-
-    result->return_ptr = return_ptr;
-    return result;
-}
 
 static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
-#define TO_FIXNUM(__x) static_cast<int32_t>(((static_cast<uint32_t>(__x) << 1) + 1) & UINT32_MAX)
-#define FROM_FIXNUM(__x) static_cast<int32_t>(static_cast<uint32_t>(__x) >> 1)
-#define IS_FIXNUM(__x) (((__x) & 1) != 0)
-
-#define INVALID static_cast<uint32_t>(-1)
-
-    std::shared_ptr<const void * []> converted {
-        new const void * [bytecode->code_size],
-        std::default_delete<const void * []> {},
+    std::shared_ptr<CC[]> converted {
+        new CC[bytecode->code_size],
+        std::default_delete<CC[]> {},
     };
 
-    std::shared_ptr<void * []> global_area {
-        new void * [bytecode->global_size],
-        std::default_delete<void * []> {},
+    std::shared_ptr<value[]> global_area {
+        new value[bytecode->global_size],
+        std::default_delete<value[]> {},
     };
 
-    static_assert(sizeof(int32_t) <= sizeof(void *));
-
-    const void * const * const converted_base = converted.get();
-    void ** const global_area_base = global_area.get();
+    const CC * const converted_base = converted.get();
+    value * const global_area_base = global_area.get();
 
     {
-        const void * bytecode_ptrs[256] = {};
-        bytecode_ptrs[IC::BINOP_add] = &&I_BINOP_add;
-        bytecode_ptrs[IC::BINOP_sub] = &&I_BINOP_sub;
-        bytecode_ptrs[IC::BINOP_mul] = &&I_BINOP_mul;
-        bytecode_ptrs[IC::BINOP_div] = &&I_BINOP_div;
-        bytecode_ptrs[IC::BINOP_rem] = &&I_BINOP_rem;
-        bytecode_ptrs[IC::BINOP_lt] = &&I_BINOP_lt;
-        bytecode_ptrs[IC::BINOP_le] = &&I_BINOP_le;
-        bytecode_ptrs[IC::BINOP_gt] = &&I_BINOP_gt;
-        bytecode_ptrs[IC::BINOP_ge] = &&I_BINOP_ge;
-        bytecode_ptrs[IC::BINOP_eq] = &&I_BINOP_eq;
-        bytecode_ptrs[IC::BINOP_ne] = &&I_BINOP_ne;
-        bytecode_ptrs[IC::BINOP_and] = &&I_BINOP_and;
-        bytecode_ptrs[IC::BINOP_or] = &&I_BINOP_or;
-        bytecode_ptrs[IC::CONST] = &&I_CONST;
-        bytecode_ptrs[IC::STRING] = &&I_STRING;
-        bytecode_ptrs[IC::SEXP] = &&I_SEXP;
-        bytecode_ptrs[IC::STI] = &&I_STI;
-        bytecode_ptrs[IC::STA] = &&I_STA;
-        bytecode_ptrs[IC::JMP] = &&I_JMP;
-        bytecode_ptrs[IC::END] = &&I_END;
-        bytecode_ptrs[IC::RET] = &&I_RET;
-        bytecode_ptrs[IC::DROP] = &&I_DROP;
-        bytecode_ptrs[IC::DUP] = &&I_DUP;
-        bytecode_ptrs[IC::SWAP] = &&I_SWAP;
-        bytecode_ptrs[IC::ELEM] = &&I_ELEM;
-        bytecode_ptrs[IC::LD_G] = &&I_LD_G;
-        bytecode_ptrs[IC::LD_L] = &&I_LD_AL;
-        bytecode_ptrs[IC::LD_A] = &&I_LD_AL;
-        bytecode_ptrs[IC::LD_C] = &&I_LD_C;
-        bytecode_ptrs[IC::LDA_G] = &&I_LDA_G;
-        bytecode_ptrs[IC::LDA_L] = &&I_LDA_AL;
-        bytecode_ptrs[IC::LDA_A] = &&I_LDA_AL;
-        bytecode_ptrs[IC::LDA_C] = &&I_LDA_C;
-        bytecode_ptrs[IC::ST_G] = &&I_ST_G;
-        bytecode_ptrs[IC::ST_L] = &&I_ST_AL;
-        bytecode_ptrs[IC::ST_A] = &&I_ST_AL;
-        bytecode_ptrs[IC::ST_C] = &&I_ST_C;
-        bytecode_ptrs[IC::CJMPz] = &&I_CJMPz;
-        bytecode_ptrs[IC::CJMPnz] = &&I_CJMPnz;
-        bytecode_ptrs[IC::BEGIN] = &&I_BEGIN;
-        bytecode_ptrs[IC::CBEGIN] = &&I_CBEGIN;
-        bytecode_ptrs[IC::CLOSURE] = &&I_CLOSURE;
-        bytecode_ptrs[IC::CALLC] = &&I_CALLC;
-        bytecode_ptrs[IC::CALL] = &&I_CALL;
-        bytecode_ptrs[IC::TAG] = &&I_TAG;
-        bytecode_ptrs[IC::ARRAY] = &&I_ARRAY;
-        bytecode_ptrs[IC::FAIL] = &&I_FAIL;
-        bytecode_ptrs[IC::PATT_str] = &&I_PATT_str;
-        bytecode_ptrs[IC::PATT_string] = &&I_PATT_string;
-        bytecode_ptrs[IC::PATT_array] = &&I_PATT_array;
-        bytecode_ptrs[IC::PATT_sexp] = &&I_PATT_sexp;
-        bytecode_ptrs[IC::PATT_ref] = &&I_PATT_ref;
-        bytecode_ptrs[IC::PATT_val] = &&I_PATT_val;
-        bytecode_ptrs[IC::PATT_fun] = &&I_PATT_fun;
-        bytecode_ptrs[IC::CALL_Lread] = &&I_CALL_Lread;
-        bytecode_ptrs[IC::CALL_Lwrite] = &&I_CALL_Lwrite;
-        bytecode_ptrs[IC::CALL_Llength] = &&I_CALL_Llength;
-        bytecode_ptrs[IC::CALL_Lstring] = &&I_CALL_Lstring;
-        bytecode_ptrs[IC::CALL_Barray] = &&I_CALL_Barray;
+        const void * interpreter_ptrs[256] = {};
+        interpreter_ptrs[IC::BINOP_add] = &&I_BINOP_add;
+        interpreter_ptrs[IC::BINOP_sub] = &&I_BINOP_sub;
+        interpreter_ptrs[IC::BINOP_mul] = &&I_BINOP_mul;
+        interpreter_ptrs[IC::BINOP_div] = &&I_BINOP_div;
+        interpreter_ptrs[IC::BINOP_rem] = &&I_BINOP_rem;
+        interpreter_ptrs[IC::BINOP_lt] = &&I_BINOP_lt;
+        interpreter_ptrs[IC::BINOP_le] = &&I_BINOP_le;
+        interpreter_ptrs[IC::BINOP_gt] = &&I_BINOP_gt;
+        interpreter_ptrs[IC::BINOP_ge] = &&I_BINOP_ge;
+        interpreter_ptrs[IC::BINOP_eq] = &&I_BINOP_eq;
+        interpreter_ptrs[IC::BINOP_ne] = &&I_BINOP_ne;
+        interpreter_ptrs[IC::BINOP_and] = &&I_BINOP_and;
+        interpreter_ptrs[IC::BINOP_or] = &&I_BINOP_or;
+        interpreter_ptrs[IC::CONST] = &&I_CONST;
+        interpreter_ptrs[IC::STRING] = &&I_STRING;
+        interpreter_ptrs[IC::SEXP] = &&I_SEXP;
+        interpreter_ptrs[IC::STI] = &&I_STI;
+        interpreter_ptrs[IC::STA] = &&I_STA;
+        interpreter_ptrs[IC::JMP] = &&I_JMP;
+        interpreter_ptrs[IC::END] = &&I_END;
+        interpreter_ptrs[IC::RET] = &&I_RET;
+        interpreter_ptrs[IC::DROP] = &&I_DROP;
+        interpreter_ptrs[IC::DUP] = &&I_DUP;
+        interpreter_ptrs[IC::SWAP] = &&I_SWAP;
+        interpreter_ptrs[IC::ELEM] = &&I_ELEM;
+        interpreter_ptrs[IC::LD_G] = &&I_LD_G;
+        interpreter_ptrs[IC::LD_L] = &&I_LD_AL;
+        interpreter_ptrs[IC::LD_A] = &&I_LD_AL;
+        interpreter_ptrs[IC::LD_C] = &&I_LD_C;
+        interpreter_ptrs[IC::LDA_G] = &&I_LDA_G;
+        interpreter_ptrs[IC::LDA_L] = &&I_LDA_AL;
+        interpreter_ptrs[IC::LDA_A] = &&I_LDA_AL;
+        interpreter_ptrs[IC::LDA_C] = &&I_LDA_C;
+        interpreter_ptrs[IC::ST_G] = &&I_ST_G;
+        interpreter_ptrs[IC::ST_L] = &&I_ST_AL;
+        interpreter_ptrs[IC::ST_A] = &&I_ST_AL;
+        interpreter_ptrs[IC::ST_C] = &&I_ST_C;
+        interpreter_ptrs[IC::CJMPz] = &&I_CJMPz;
+        interpreter_ptrs[IC::CJMPnz] = &&I_CJMPnz;
+        interpreter_ptrs[IC::BEGIN] = &&I_BEGIN;
+        interpreter_ptrs[IC::CBEGIN] = &&I_CBEGIN;
+        interpreter_ptrs[IC::CLOSURE] = &&I_CLOSURE;
+        interpreter_ptrs[IC::CALLC] = &&I_CALLC;
+        interpreter_ptrs[IC::CALL] = &&I_CALL;
+        interpreter_ptrs[IC::TAG] = &&I_TAG;
+        interpreter_ptrs[IC::ARRAY] = &&I_ARRAY;
+        interpreter_ptrs[IC::FAIL] = &&I_FAIL;
+        interpreter_ptrs[IC::PATT_str] = &&I_PATT_str;
+        interpreter_ptrs[IC::PATT_string] = &&I_PATT_string;
+        interpreter_ptrs[IC::PATT_array] = &&I_PATT_array;
+        interpreter_ptrs[IC::PATT_sexp] = &&I_PATT_sexp;
+        interpreter_ptrs[IC::PATT_ref] = &&I_PATT_ref;
+        interpreter_ptrs[IC::PATT_val] = &&I_PATT_val;
+        interpreter_ptrs[IC::PATT_fun] = &&I_PATT_fun;
+        interpreter_ptrs[IC::CALL_Lread] = &&I_CALL_Lread;
+        interpreter_ptrs[IC::CALL_Lwrite] = &&I_CALL_Lwrite;
+        interpreter_ptrs[IC::CALL_Llength] = &&I_CALL_Llength;
+        interpreter_ptrs[IC::CALL_Lstring] = &&I_CALL_Lstring;
+        interpreter_ptrs[IC::CALL_Barray] = &&I_CALL_Barray;
 
-        converted[0] = &&finish;
+        converted[0].interpreter = &&finish;
 
-        std::size_t current_function_idx = INVALID;
+        std::size_t current_function_idx = UINT32_MAX;
         std::size_t current_function_args = 0;
         std::size_t current_function_locals = 0;
 
@@ -299,23 +333,24 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     bytecode->code_ptr + bytecode_idx + 4
                 );
             } else if (code == IC::END) {
-                current_function_idx = INVALID;
+                current_function_idx = UINT32_MAX;
                 current_function_args = 0;
                 current_function_locals = 0;
             }
 
-            const void * bytecode_ptr = bytecode_ptrs[code];
-            if (!bytecode_ptr) {
-                bytecode_ptr = &&I_unsupported;
+            const void * interpreter_ptr = interpreter_ptrs[code];
+            if (!interpreter_ptr) {
+                interpreter_ptr = &&I_unsupported;
             }
 
-            converted[converted_idx++] = bytecode_ptr;
+            converted[converted_idx++].interpreter = interpreter_ptr;
 
             // TODO check same stack depth on labels
             // TODO check negative stack depth
             // TODO check is BEGIN after CALL
             // TODO check is CBEGIN in CLOSURE
             // TODO check labels accessed from same function
+            // TODO check stack depth at END
 
             switch (code) {
 
@@ -324,9 +359,9 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case CALLC:
             case ARRAY:
             case CALL_Barray: {
-                converted[converted_idx++] = reinterpret_cast<void *>(TO_FIXNUM(
+                converted[converted_idx++].fixnum = to_fixnum(
                     *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx)
-                ));
+                );
 
                 bytecode_idx += 4;
                 break;
@@ -334,7 +369,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             // string arg
             case STRING:
-                converted[converted_idx++] = bytecode->string_ptr
+                converted[converted_idx++].string = bytecode->string_ptr
                     + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
 
                 bytecode_idx += 4;
@@ -346,7 +381,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case CJMPnz:
                 // TODO convert bytecode offset to converted offset
 
-                converted[converted_idx++] = converted_base
+                converted[converted_idx++].code = converted_base
                     + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
 
                 bytecode_idx += 4;
@@ -356,7 +391,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case LD_G:
             case LDA_G:
             case ST_G:
-                converted[converted_idx++] = global_area_base
+                converted[converted_idx++].global = global_area_base
                     + *reinterpret_cast<const uint32_t *>(bytecode->code_ptr + bytecode_idx);
 
                 bytecode_idx += 4;
@@ -366,7 +401,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case LD_A:
             case LDA_A:
             case ST_A: {
-                if (current_function_idx == INVALID) {
+                if (current_function_idx == UINT32_MAX) {
                     throw std::invalid_argument { "cannot use arguments outside of function" };
                 }
 
@@ -382,7 +417,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     };
                 }
 
-                converted[converted_idx++] = reinterpret_cast<void *>(idx);
+                converted[converted_idx++].index = idx;
                 break;
             }
 
@@ -390,7 +425,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case LD_L:
             case LDA_L:
             case ST_L: {
-                if (current_function_idx == INVALID) {
+                if (current_function_idx == UINT32_MAX) {
                     throw std::invalid_argument { "cannot use locals outside of function" };
                 }
 
@@ -406,7 +441,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     };
                 }
 
-                converted[converted_idx++] = reinterpret_cast<void *>(idx + current_function_args);
+                converted[converted_idx++].index = idx + current_function_args;
                 break;
             }
 
@@ -424,13 +459,13 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case CALL:
             case TAG:
             case FAIL:
-                converted[converted_idx++] = bytecode->code_ptr + bytecode_idx;
+                converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
                 bytecode_idx += 8;
                 break;
 
             // CLOSURE
             case CLOSURE: {
-                converted[converted_idx++] = bytecode->code_ptr + bytecode_idx;
+                converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
 
                 const std::size_t n = *reinterpret_cast<const uint32_t *>(
                     bytecode->code_ptr + bytecode_idx + 4
@@ -452,17 +487,17 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         }
     }
 
-#define NEXT do { goto **ip++; } while (false)
+#define NEXT do { goto *(*ip++).interpreter; } while (false)
 
-    const void * const * ip = converted_base + 1;
-    const void * const * rip = converted_base; // TODO set in CALL and CALLC
     activation * current_activation = nullptr;
+    const CC * ip = converted_base + 1;
+    const CC * rip = converted_base; // TODO set in CALL and CALLC
 
     std::stack<activation *> activations;
-    std::stack<void *> stack;
-    stack.push(0);
-    stack.push(0);
-    stack.push(0);
+    std::stack<value> stack;
+    stack.emplace();
+    stack.emplace();
+    stack.emplace();
 
     NEXT;
 
@@ -476,13 +511,13 @@ I_BINOP_sub:
     goto I_unsupported;
 
 I_BINOP_mul: {
-    const int32_t b = FROM_FIXNUM(*reinterpret_cast<int32_t *>(&stack.top()));
+    const int32_t b = from_fixnum(*reinterpret_cast<int32_t *>(&stack.top()));
     stack.pop();
 
-    const int32_t a = FROM_FIXNUM(*reinterpret_cast<int32_t *>(&stack.top()));
+    const int32_t a = from_fixnum(*reinterpret_cast<int32_t *>(&stack.top()));
     stack.pop();
 
-    stack.push(reinterpret_cast<void *>(TO_FIXNUM(a * b)));
+    stack.emplace(to_fixnum(a * b));
     NEXT;
 }
 
@@ -518,7 +553,7 @@ I_BINOP_or:
 
 I_CONST: {
     const uint32_t imm = *reinterpret_cast<const uint32_t *>(ip++);
-    stack.push(reinterpret_cast<void *>(imm));
+    stack.emplace(imm);
     NEXT;
 }
 
@@ -539,9 +574,9 @@ I_JMP:
 
 I_END: {
     activations.pop();
-    ip = current_activation->return_ptr;
+    ip = reinterpret_cast<const CC *>(current_activation->return_ptr);
 
-    delete[] reinterpret_cast<uint8_t*>(current_activation);
+    activation::drop(current_activation);
 
     current_activation = activations.empty() ? nullptr : activations.top();
     NEXT;
@@ -564,7 +599,7 @@ I_ELEM:
     goto I_unsupported;
 
 I_LD_G: {
-    auto * const imm = const_cast<void **>(reinterpret_cast<void * const *>(*ip++));
+    auto * const imm = (ip++)->global;
     stack.push(*imm);
     NEXT;
 }
@@ -585,7 +620,7 @@ I_LDA_C:
     goto I_unsupported;
 
 I_ST_G: {
-    auto * const imm = const_cast<void **>(reinterpret_cast<void * const *>(*ip++));
+    auto * const imm = (ip++)->global;
     *imm = stack.top();
     NEXT;
 }
@@ -603,8 +638,8 @@ I_CJMPnz:
     goto I_unsupported;
 
 I_BEGIN: {
-    auto * const imm = reinterpret_cast<const uint32_t *>(*ip++);
-    auto * const act = create_activation(rip, imm[0] + imm[1]);
+    auto * const imm = reinterpret_cast<const uint32_t *>((ip++)->args);
+    auto * const act = activation::create(rip, imm[0] + imm[1]);
     rip = nullptr;
 
     for (std::size_t i = imm[0]; i > 0; --i) {
@@ -666,12 +701,12 @@ I_CALL_Lread: {
     int32_t value;
     std::cin >> value;
 
-    stack.push(reinterpret_cast<void *>(TO_FIXNUM(value)));
+    stack.emplace(to_fixnum(value));
     NEXT;
 }
 
 I_CALL_Lwrite: {
-    const int32_t value = FROM_FIXNUM(*reinterpret_cast<int32_t *>(&stack.top()));
+    const int32_t value = from_fixnum(*reinterpret_cast<int32_t *>(&stack.top()));
     stack.pop();
 
     std::cout << value << std::endl;
@@ -694,10 +729,6 @@ I_unsupported: // unsupported instruction
     throw std::invalid_argument { os.str() };
 
 #undef NEXT
-#undef INVALID
-#undef IS_FIXNUM
-#undef TO_FIXNUM
-#undef FROM_FIXNUM
 }
 
 int main(int argc, char * argv[]) {
