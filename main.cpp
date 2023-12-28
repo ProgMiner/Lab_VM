@@ -1,10 +1,13 @@
+#include <unordered_map>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <cstdint>
+#include <cstring>
 #include <memory>
-#include <stack>
+#include <vector>
 #include <list>
+#include <new>
 
 
 /* Bytecode file layout
@@ -51,6 +54,8 @@ struct bytecode_contents {
 } __attribute__((packed));
 
 // instruction code
+namespace IC {
+
 enum IC {
 
     BINOP_add       = 0x01, // BINOP +
@@ -115,13 +120,46 @@ enum IC {
     CALL_Barray     = 0x74, // CALL Barray, int
 };
 
+}
+
+union value;
+
+struct heap_object {
+
+    enum object_kind {
+
+        STRING = 0,
+        ARRAY  = 1,
+        SEXP   = 2,
+    };
+
+    uint8_t kind;
+    std::size_t fields_size;
+
+    object_kind get_kind() const {
+        switch (kind) {
+        case STRING:
+        case ARRAY:
+        case SEXP:
+            return static_cast<object_kind>(kind);
+
+        default:
+            throw std::invalid_argument { "unknown object kind" };
+        }
+    }
+
+    value & get_field(std::size_t idx) noexcept;
+};
+
 union value {
 
     uint32_t fixnum;
+    heap_object * object;
     value ** var;
 
     value() noexcept = default;
     explicit value(uint32_t fixnum) noexcept: fixnum(fixnum) {}
+    explicit value(heap_object * object) noexcept: object(object) {}
 };
 
 // converted code
@@ -140,32 +178,6 @@ union CC {
 static_assert(sizeof(value) == sizeof(void *));
 static_assert(sizeof(CC) == sizeof(void *));
 
-struct activation {
-
-    const CC * return_ptr;
-
-    value & local(std::size_t idx) {
-        return *(
-            reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this) + sizeof(activation))
-                + idx
-        );
-    }
-
-    static activation * create(const CC * return_ptr, std::size_t locals) {
-        auto result = reinterpret_cast<activation *>(
-            // zero-initialized
-            new uint8_t[sizeof(activation) + sizeof(value) * locals] {}
-        );
-
-        result->return_ptr = return_ptr;
-        return result;
-    }
-
-    static void drop(activation * act) {
-        delete[] reinterpret_cast<uint8_t *>(act);
-    }
-};
-
 struct instruction_meta {
 
     const CC * converted = nullptr;
@@ -174,9 +186,210 @@ struct instruction_meta {
     std::list<CC *> forward_ptrs;
 };
 
+struct activation {
+
+    activation * parent;
+    const CC * return_ptr;
+    std::size_t locals_size;
+
+    value & local(std::size_t idx) noexcept {
+        return *(
+            reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this) + sizeof(activation))
+                + idx
+        );
+    }
+
+    static activation * create(activation * parent, const CC * return_ptr, std::size_t locals) {
+        auto result = reinterpret_cast<activation *>(
+            // zero-initialized
+            new uint8_t[sizeof(activation) + sizeof(value) * locals] {}
+        );
+
+        result->parent = parent;
+        result->return_ptr = return_ptr;
+        result->locals_size = locals;
+        return result;
+    }
+
+    static void drop(activation * act) {
+        delete[] reinterpret_cast<uint8_t *>(act);
+    }
+};
+
+static bool is_fixnum(uint32_t x) noexcept;
+
+struct heap {
+
+    value * global_area;
+    std::size_t global_area_size;
+
+    std::vector<value> & stack;
+
+    activation * & current_activation;
+
+    std::unique_ptr<uint8_t[], std::default_delete<uint8_t[]>> buffer;
+    uint8_t * first_half;
+    uint8_t * second_half;
+
+    std::size_t offset = 0;
+    std::size_t size;
+
+    heap(
+        value * global_area,
+        std::size_t global_area_size,
+        std::vector<value> & stack,
+        activation * & current_activation
+    )
+        : global_area(global_area)
+        , global_area_size(global_area_size)
+        , stack(stack)
+        , current_activation(current_activation)
+        , buffer(new uint8_t[32])
+        , first_half(buffer.get())
+        , second_half(first_half + 16)
+        , size(32)
+    {
+        if (!buffer) {
+            throw std::bad_alloc {};
+        }
+    }
+
+    static constexpr std::size_t align_size(std::size_t size) {
+        return (size + 15) / 16 * 16;
+    }
+
+    heap_object * alloc(std::size_t object_size) {
+        std::size_t real_object_size = align_size(sizeof(heap_object)) + align_size(object_size);
+        request(real_object_size);
+
+        auto * const result = reinterpret_cast<heap_object *>(first_half + offset);
+        offset += real_object_size;
+
+        std::memset(result, 0, real_object_size);
+        return result;
+    }
+
+    bool is_heap_value(value val) noexcept {
+        if (is_fixnum(val.fixnum)) {
+            return false;
+        }
+
+        const auto * const raw_ptr = reinterpret_cast<const uint8_t *>(val.object);
+        if (raw_ptr < first_half || raw_ptr >= first_half + offset) {
+            return false;
+        }
+
+        return true;
+    }
+
+    void assert_heap_value(value val) {
+        if (!is_heap_value(val)) {
+            throw std::invalid_argument { "argument is not heap value" };
+        }
+    }
+
+    void request(std::size_t object_size) {
+        if (offset + object_size <= size / 2) {
+            return;
+        }
+
+        gc();
+
+        while (offset + object_size > size / 2) {
+            grow();
+        }
+    }
+
+    void gc() {
+        std::size_t new_offset = 0;
+        std::unordered_map<const heap_object *, heap_object *> moved_objects;
+
+        for (std::size_t i = 0; i < global_area_size; ++i) {
+            move_value(global_area[i], new_offset, moved_objects);
+        }
+
+        for (value & v : stack) {
+            move_value(v, new_offset, moved_objects);
+        }
+
+        {
+            activation * act = current_activation;
+
+            while (act) {
+                for (std::size_t i = 0; i < act->locals_size; ++i) {
+                    move_value(act->local(i), new_offset, moved_objects);
+                }
+
+                act = act->parent;
+            }
+        }
+
+        std::swap(first_half, second_half);
+        offset = new_offset;
+    }
+
+    void move_value(
+        value & val,
+        std::size_t & new_offset,
+        std::unordered_map<const heap_object *, heap_object *> & moved_objects
+    ) {
+        if (!is_heap_value(val)) {
+            return;
+        }
+
+        heap_object * const heap_ptr = val.object;
+        if (auto it = moved_objects.find(heap_ptr); it != moved_objects.end()) {
+            val.object = it->second;
+            return;
+        }
+
+        const heap_object::object_kind k = heap_ptr->get_kind();
+        const std::size_t object_size = align_size(sizeof(heap_object))
+            + align_size(k == heap_object::STRING ? heap_ptr->fields_size
+                : sizeof(value) * heap_ptr->fields_size);
+
+        heap_object * const new_ptr = reinterpret_cast<heap_object *>(second_half + new_offset);
+        new_offset += object_size;
+
+        std::memcpy(new_ptr, heap_ptr, object_size);
+
+        moved_objects[heap_ptr] = new_ptr;
+        val.object = new_ptr;
+
+        if (k == heap_object::STRING) {
+            return;
+        }
+
+        for (std::size_t i = 0; i < new_ptr->fields_size; ++i) {
+            move_value(new_ptr->get_field(i), new_offset, moved_objects);
+        }
+    }
+
+    void grow() {
+        uint8_t * new_buffer = new uint8_t[size * 2];
+
+        if (!new_buffer) {
+            throw std::bad_alloc {};
+        }
+
+        second_half = new_buffer;
+        gc();
+
+        second_half = new_buffer + size;
+        size *= 2;
+
+        buffer.reset(new_buffer);
+    }
+};
+
 
 static std::ofstream log_file { "./log.txt" };
 
+
+value & heap_object::get_field(std::size_t idx) noexcept {
+    return *(reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this)
+        + heap::align_size(sizeof(activation))) + idx);
+}
 
 static uint32_t to_fixnum(int32_t x) noexcept {
     return static_cast<uint32_t>(x << 1) | 1;
@@ -186,9 +399,9 @@ static int32_t from_fixnum(uint32_t x) noexcept {
     return static_cast<int32_t>(x) >> 1;
 }
 
-// static bool is_fixnum(uint32_t x) noexcept {
-//     return (x & 1) != 0;
-// }
+static bool is_fixnum(uint32_t x) noexcept {
+    return (x & 1) != 0;
+}
 
 template<typename T>
 static const T & read_from_bytes(const uint8_t * buffer, std::size_t & idx) {
@@ -332,7 +545,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         std::size_t bytecode_idx = 0;
         std::size_t converted_idx = 2;
         while (bytecode_idx < bytecode->code_size) {
-            const IC code = static_cast<IC>(bytecode->code_ptr[bytecode_idx++]);
+            const auto code = static_cast<IC::IC>(bytecode->code_ptr[bytecode_idx++]);
 
             log_file << "0x" << std::hex << bytecode_idx - 1
                      << " (0x" << converted_idx
@@ -382,16 +595,16 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             switch (code) {
 
             // plain int arg
-            case CONST:
-            case CALLC:
-            case ARRAY:
-            case CALL_Barray:
+            case IC::CONST:
+            case IC::CALLC:
+            case IC::ARRAY:
+            case IC::CALL_Barray:
                 converted[converted_idx++].fixnum =
                     to_fixnum(read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx));
                 break;
 
             // string arg
-            case STRING: {
+            case IC::STRING: {
                 const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
                 if (idx >= bytecode->string_size) {
                     throw std::invalid_argument { "pointer to string out of range" };
@@ -402,10 +615,10 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             // offset in code arg
-            case JMP:
-            case CJMPz:
-            case CJMPnz:
-            case CALL: {
+            case IC::JMP:
+            case IC::CJMPz:
+            case IC::CJMPnz:
+            case IC::CALL: {
                 const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
                 if (idx >= bytecode->code_size) {
                     throw std::invalid_argument { "pointer to bytecode out of range" };
@@ -420,7 +633,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     converted[converted_idx++].code = converted_base + 1;
                 }
 
-                if (code == CALL) { // ignore second arg
+                if (code == IC::CALL) { // ignore second arg
                     bytecode_idx += 4;
                 }
 
@@ -428,9 +641,9 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             // G(int) arg
-            case LD_G:
-            case LDA_G:
-            case ST_G: {
+            case IC::LD_G:
+            case IC::LDA_G:
+            case IC::ST_G: {
                 const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
                 if (idx >= bytecode->code_size) {
                     throw std::invalid_argument { "global index out of range" };
@@ -441,9 +654,9 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             // A(int) arg
-            case LD_A:
-            case LDA_A:
-            case ST_A: {
+            case IC::LD_A:
+            case IC::LDA_A:
+            case IC::ST_A: {
                 if (current_function_idx == UINT32_MAX) {
                     throw std::invalid_argument { "cannot use arguments outside of function" };
                 }
@@ -460,9 +673,9 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             // L(int) arg
-            case LD_L:
-            case LDA_L:
-            case ST_L: {
+            case IC::LD_L:
+            case IC::LDA_L:
+            case IC::ST_L: {
                 if (current_function_idx == UINT32_MAX) {
                     throw std::invalid_argument { "cannot use locals outside of function" };
                 }
@@ -479,24 +692,24 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             // TODO C(int) arg
-            case LD_C:
-            case LDA_C:
-            case ST_C:
+            case IC::LD_C:
+            case IC::LDA_C:
+            case IC::ST_C:
                 bytecode_idx += 4;
                 break;
 
             // 2 args
-            case SEXP:
-            case BEGIN:
-            case CBEGIN:
-            case TAG:
-            case FAIL:
+            case IC::SEXP:
+            case IC::BEGIN:
+            case IC::CBEGIN:
+            case IC::TAG:
+            case IC::FAIL:
                 converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
                 bytecode_idx += 8;
                 break;
 
             // CLOSURE
-            case CLOSURE: {
+            case IC::CLOSURE: {
                 converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
 
                 const std::size_t n = read_from_bytes<uint32_t>(
@@ -525,11 +738,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     const CC * ip = converted_base + 2;
     const CC * rip = converted_base; // TODO set in CALL and CALLC
 
-    std::stack<activation *> activations;
-    std::stack<value> stack;
-    stack.emplace(); // argc
-    stack.emplace(); // argv
-    stack.emplace(); // envp (failsafe)
+    std::vector<value> stack;
+    stack.emplace_back(); // argc
+    stack.emplace_back(); // argv
+    stack.emplace_back(); // envp (failsafe)
+
+    struct heap heap { global_area_base, bytecode->global_size, stack, current_activation };
 
     NEXT;
 
@@ -537,155 +751,166 @@ finish:
     return;
 
 I_BINOP_add: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a + b));
+    stack.emplace_back(to_fixnum(a + b));
     NEXT;
 }
 
 I_BINOP_sub: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a - b));
+    stack.emplace_back(to_fixnum(a - b));
     NEXT;
 }
 
 I_BINOP_mul: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a * b));
+    stack.emplace_back(to_fixnum(a * b));
     NEXT;
 }
 
 I_BINOP_div: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a / b));
+    stack.emplace_back(to_fixnum(a / b));
     NEXT;
 }
 
 I_BINOP_rem: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a % b));
+    stack.emplace_back(to_fixnum(a % b));
     NEXT;
 }
 
 I_BINOP_lt: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a < b));
+    stack.emplace_back(to_fixnum(a < b));
     NEXT;
 }
 
 I_BINOP_le: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a <= b));
+    stack.emplace_back(to_fixnum(a <= b));
     NEXT;
 }
 
 I_BINOP_gt: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a > b));
+    stack.emplace_back(to_fixnum(a > b));
     NEXT;
 }
 
 I_BINOP_ge: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a >= b));
+    stack.emplace_back(to_fixnum(a >= b));
     NEXT;
 }
 
 I_BINOP_eq: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a == b));
+    stack.emplace_back(to_fixnum(a == b));
     NEXT;
 }
 
 I_BINOP_ne: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a != b));
+    stack.emplace_back(to_fixnum(a != b));
     NEXT;
 }
 
 I_BINOP_and: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a && b));
+    stack.emplace_back(to_fixnum(a && b));
     NEXT;
 }
 
 I_BINOP_or: {
-    const int32_t b = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t b = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    const int32_t a = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t a = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
-    stack.emplace(to_fixnum(a || b));
+    stack.emplace_back(to_fixnum(a || b));
     NEXT;
 }
 
 I_CONST: {
-    stack.emplace((ip++)->fixnum);
+    stack.emplace_back((ip++)->fixnum);
     NEXT;
 }
 
-I_STRING:
-    goto I_unsupported;
+I_STRING: {
+    const char * const str = (ip++)->string;
+    const std::size_t str_size = std::strlen(str);
+
+    auto * const result = heap.alloc(str_size);
+    result->kind = heap_object::STRING;
+    result->fields_size = str_size;
+
+    std::memcpy(reinterpret_cast<uint8_t *>(result) + sizeof(heap_object), str, str_size);
+
+    stack.emplace_back(result);
+    NEXT;
+}
 
 I_SEXP:
     goto I_unsupported;
@@ -693,8 +918,42 @@ I_SEXP:
 I_STI:
     goto I_unsupported;
 
-I_STA:
-    goto I_unsupported;
+I_STA: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    const int32_t index = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
+
+    const value xs = stack.back();
+    stack.pop_back();
+
+    heap.assert_heap_value(xs);
+
+    heap_object * const obj = xs.object;
+
+    if (index < 0 || static_cast<std::size_t>(index) >= obj->fields_size) {
+        throw std::invalid_argument { "index is out of range" };
+    }
+
+    switch (obj->get_kind()) {
+    case heap_object::STRING:
+        if (!is_fixnum(x.fixnum)) {
+            throw std::invalid_argument { "cannon assign non-integral value in string" };
+        }
+
+        reinterpret_cast<uint8_t *>(obj)[sizeof(heap_object) + index] = from_fixnum(x.fixnum);
+        break;
+
+    case heap_object::ARRAY:
+    case heap_object::SEXP:
+        obj->get_field(index) = x;
+        break;
+    }
+
+    stack.push_back(x);
+    NEXT;
+}
 
 I_JMP: {
     auto * const imm = (ip++)->code;
@@ -703,12 +962,12 @@ I_JMP: {
 }
 
 I_END: {
-    activations.pop();
     ip = current_activation->return_ptr;
 
-    activation::drop(current_activation);
+    auto * const tmp = current_activation;
+    current_activation = tmp->parent;
+    activation::drop(tmp);
 
-    current_activation = activations.empty() ? nullptr : activations.top();
     NEXT;
 }
 
@@ -716,7 +975,7 @@ I_RET:
     goto I_unsupported;
 
 I_DROP:
-    stack.pop();
+    stack.pop_back();
     NEXT;
 
 I_DUP:
@@ -725,18 +984,48 @@ I_DUP:
 I_SWAP:
     goto I_unsupported;
 
-I_ELEM:
-    goto I_unsupported;
+I_ELEM: {
+    const int32_t index = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
+
+    const value x = stack.back();
+    stack.pop_back();
+
+    heap.assert_heap_value(x);
+
+    heap_object * const obj = x.object;
+
+    if (index < 0 || static_cast<std::size_t>(index) >= obj->fields_size) {
+        throw std::invalid_argument { "index is out of range" };
+    }
+
+    value result;
+    switch (obj->get_kind()) {
+    case heap_object::STRING:
+        result = value {
+            to_fixnum(reinterpret_cast<uint8_t *>(obj)[sizeof(heap_object) + index]),
+        };
+        break;
+
+    case heap_object::ARRAY:
+    case heap_object::SEXP:
+        result = obj->get_field(index);
+        break;
+    }
+
+    stack.emplace_back(result);
+    NEXT;
+}
 
 I_LD_G: {
     auto * const imm = (ip++)->global;
-    stack.push(*imm);
+    stack.push_back(*imm);
     NEXT;
 }
 
 I_LD_AL: {
     const std::size_t imm = (ip++)->index;
-    stack.push(current_activation->local(imm));
+    stack.push_back(current_activation->local(imm));
     NEXT;
 }
 
@@ -754,13 +1043,13 @@ I_LDA_C:
 
 I_ST_G: {
     auto * const imm = (ip++)->global;
-    *imm = stack.top();
+    *imm = stack.back();
     NEXT;
 }
 
 I_ST_AL: {
     const std::size_t imm = (ip++)->index;
-    current_activation->local(imm) = stack.top();
+    current_activation->local(imm) = stack.back();
     NEXT;
 }
 
@@ -769,8 +1058,8 @@ I_ST_C:
 
 I_CJMPz: {
     auto * const imm = (ip++)->code;
-    const int32_t x = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t x = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
     if (x == 0) {
         ip = imm;
@@ -781,8 +1070,8 @@ I_CJMPz: {
 
 I_CJMPnz: {
     auto * const imm = (ip++)->code;
-    const int32_t x = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t x = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
     if (x != 0) {
         ip = imm;
@@ -793,16 +1082,15 @@ I_CJMPnz: {
 
 I_BEGIN: {
     auto imm = read_from_bytes<uint32_t[2]>((ip++)->args);
-    auto * const act = activation::create(rip, imm[0] + imm[1]);
+    auto * const act = activation::create(current_activation, rip, imm[0] + imm[1]);
     rip = nullptr;
 
     for (std::size_t i = imm[0]; i > 0; --i) {
-        act->local(i - 1) = stack.top();
-        stack.pop();
+        act->local(i - 1) = stack.back();
+        stack.pop_back();
     }
 
     current_activation = act;
-    activations.push(act);
     NEXT;
 }
 
@@ -859,22 +1147,28 @@ I_CALL_Lread: {
     int32_t value;
     std::cin >> value;
 
-    stack.emplace(to_fixnum(value));
+    stack.emplace_back(to_fixnum(value));
     NEXT;
 }
 
 I_CALL_Lwrite: {
-    const int32_t value = from_fixnum(stack.top().fixnum);
-    stack.pop();
+    const int32_t value = from_fixnum(stack.back().fixnum);
+    stack.pop_back();
 
     std::cout << value << std::endl;
 
-    stack.emplace();
+    stack.emplace_back();
     NEXT;
 }
 
-I_CALL_Llength:
-    goto I_unsupported;
+I_CALL_Llength: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    heap.assert_heap_value(x);
+    stack.emplace_back(to_fixnum(x.object->fields_size));
+    NEXT;
+}
 
 I_CALL_Lstring:
     goto I_unsupported;
