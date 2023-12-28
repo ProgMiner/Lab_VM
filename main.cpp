@@ -122,6 +122,10 @@ enum IC {
 
 }
 
+
+static std::ofstream log_file { "./log.txt" };
+
+
 union value;
 
 struct heap_object {
@@ -148,13 +152,14 @@ struct heap_object {
         }
     }
 
-    value & get_field(std::size_t idx) noexcept;
+    value & field(std::size_t idx) noexcept;
 };
 
 union value {
 
     uint32_t fixnum;
     heap_object * object;
+    const char * tag;
     value ** var;
 
     value() noexcept = default;
@@ -167,6 +172,7 @@ union CC {
 
     const void * interpreter;
 
+    int32_t num;
     uint32_t fixnum;
     const char * string;
     const CC * code;
@@ -254,18 +260,41 @@ struct heap {
         }
     }
 
-    static constexpr std::size_t align_size(std::size_t size) {
+    static constexpr std::size_t align_size(std::size_t size) noexcept {
         return (size + 15) / 16 * 16;
     }
 
-    heap_object * alloc(std::size_t object_size) {
-        std::size_t real_object_size = align_size(sizeof(heap_object)) + align_size(object_size);
-        request(real_object_size);
+    static constexpr std::size_t get_object_size(
+        heap_object::object_kind kind,
+        std::size_t fields
+    ) {
+        switch (kind) {
+        case heap_object::STRING:
+            return fields;
+
+        case heap_object::ARRAY:
+            return fields * sizeof(value);
+
+        case heap_object::SEXP:
+            return (fields + 1) * sizeof(value);
+        }
+
+        throw std::invalid_argument { "unsupported kind" };
+    }
+
+    heap_object * alloc(heap_object::object_kind kind, std::size_t fields) {
+        std::size_t object_size = align_size(sizeof(heap_object))
+            + align_size(get_object_size(kind, fields));
+
+        request(object_size);
 
         auto * const result = reinterpret_cast<heap_object *>(first_half + offset);
-        offset += real_object_size;
+        offset += object_size;
 
-        std::memset(result, 0, real_object_size);
+        std::memset(result, 0, object_size);
+
+        result->kind = kind;
+        result->fields_size = fields;
         return result;
     }
 
@@ -303,6 +332,8 @@ struct heap {
     void gc() {
         std::size_t new_offset = 0;
         std::unordered_map<const heap_object *, heap_object *> moved_objects;
+
+        log_file << "Run GC" << std::endl;
 
         for (std::size_t i = 0; i < global_area_size; ++i) {
             move_value(global_area[i], new_offset, moved_objects);
@@ -345,13 +376,17 @@ struct heap {
 
         const heap_object::object_kind k = heap_ptr->get_kind();
         const std::size_t object_size = align_size(sizeof(heap_object))
-            + align_size(k == heap_object::STRING ? heap_ptr->fields_size
-                : sizeof(value) * heap_ptr->fields_size);
+            + align_size(get_object_size(k, heap_ptr->fields_size));
 
         heap_object * const new_ptr = reinterpret_cast<heap_object *>(second_half + new_offset);
         new_offset += object_size;
 
         std::memcpy(new_ptr, heap_ptr, object_size);
+
+        log_file << "Moved object of size " << object_size
+                 << ' ' << heap_ptr
+                 << " -> " << new_ptr
+                 << std::endl;
 
         moved_objects[heap_ptr] = new_ptr;
         val.object = new_ptr;
@@ -361,7 +396,7 @@ struct heap {
         }
 
         for (std::size_t i = 0; i < new_ptr->fields_size; ++i) {
-            move_value(new_ptr->get_field(i), new_offset, moved_objects);
+            move_value(new_ptr->field(i), new_offset, moved_objects);
         }
     }
 
@@ -379,16 +414,18 @@ struct heap {
         size *= 2;
 
         buffer.reset(new_buffer);
+
+        log_file << "Heap grown to " << size
+                 << " (" << reinterpret_cast<void *>(first_half)
+                 << ", " << reinterpret_cast<void *>(second_half)
+                 << ')' << std::endl;
     }
 };
 
 
-static std::ofstream log_file { "./log.txt" };
-
-
-value & heap_object::get_field(std::size_t idx) noexcept {
+value & heap_object::field(std::size_t idx) noexcept {
     return *(reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this)
-        + heap::align_size(sizeof(activation))) + idx);
+        + heap::align_size(sizeof(heap_object))) + idx);
 }
 
 static uint32_t to_fixnum(int32_t x) noexcept {
@@ -538,6 +575,8 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             std::default_delete<instruction_meta[]>
         > instructions_meta { new instruction_meta[bytecode->code_size] {} };
 
+        std::unordered_map<std::string_view, const char *> tags;
+
         std::size_t current_function_idx = UINT32_MAX;
         std::size_t current_function_args = 0;
         std::size_t current_function_locals = 0;
@@ -592,27 +631,43 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check labels accessed from same function
             // TODO check stack depth at END
 
+#define NAT_ARG(__var) do { \
+    const int32_t imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (imm < 0) { \
+        throw std::invalid_argument { "negative argument" }; \
+    } \
+\
+    __var = imm; \
+} while (false)
+
+#define STRING_ARG(__var) do { \
+    const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (idx >= bytecode->string_size) { \
+        throw std::invalid_argument { "pointer to string out of range" }; \
+    } \
+\
+    __var = bytecode->string_ptr + idx; \
+} while (false)
+
             switch (code) {
 
-            // plain int arg
+            // fixnum arg
             case IC::CONST:
-            case IC::CALLC:
-            case IC::ARRAY:
-            case IC::CALL_Barray:
                 converted[converted_idx++].fixnum =
                     to_fixnum(read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx));
                 break;
 
-            // string arg
-            case IC::STRING: {
-                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-                if (idx >= bytecode->string_size) {
-                    throw std::invalid_argument { "pointer to string out of range" };
-                }
-
-                converted[converted_idx++].string = bytecode->string_ptr + idx;
+            // nat arg
+            case IC::CALLC:
+            case IC::ARRAY:
+            case IC::CALL_Barray:
+                NAT_ARG(converted[converted_idx++].num);
                 break;
-            }
+
+            // string arg
+            case IC::STRING:
+                STRING_ARG(converted[converted_idx++].string);
+                break;
 
             // offset in code arg
             case IC::JMP:
@@ -698,15 +753,30 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 bytecode_idx += 4;
                 break;
 
-            // 2 args
-            case IC::SEXP:
+            // nat, nat args
             case IC::BEGIN:
             case IC::CBEGIN:
-            case IC::TAG:
             case IC::FAIL:
-                converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
-                bytecode_idx += 8;
+                NAT_ARG(converted[converted_idx++].num);
+                NAT_ARG(converted[converted_idx++].num);
                 break;
+
+            // tag, nat args
+            case IC::SEXP:
+            case IC::TAG: {
+                const char * tag;
+                STRING_ARG(tag);
+
+                if (auto it = tags.find(tag); it != tags.end()) {
+                    tag = it->second;
+                } else {
+                    tags[tag] = tag;
+                }
+
+                converted[converted_idx++].string = tag;
+                NAT_ARG(converted[converted_idx++].num);
+                break;
+            }
 
             // CLOSURE
             case IC::CLOSURE: {
@@ -724,6 +794,9 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             default:
                 break;
             }
+
+#undef NAT_ARG
+#undef STRING_ARG
         }
 
         if ((bytecode->code_ptr[bytecode_idx - 1] & 0xF0) != 0xF0) {
@@ -902,9 +975,7 @@ I_STRING: {
     const char * const str = (ip++)->string;
     const std::size_t str_size = std::strlen(str);
 
-    auto * const result = heap.alloc(str_size);
-    result->kind = heap_object::STRING;
-    result->fields_size = str_size;
+    auto * const result = heap.alloc(heap_object::STRING, str_size);
 
     std::memcpy(reinterpret_cast<uint8_t *>(result) + sizeof(heap_object), str, str_size);
 
@@ -912,8 +983,21 @@ I_STRING: {
     NEXT;
 }
 
-I_SEXP:
-    goto I_unsupported;
+I_SEXP: {
+    const char * const imm1 = (ip++)->string;
+    const int32_t imm2 = (ip++)->num;
+
+    auto * const result = heap.alloc(heap_object::SEXP, imm2);
+
+    for (int32_t i = imm2 - 1; i >= 0; --i) {
+        result->field(i) = stack.back();
+        stack.pop_back();
+    }
+
+    result->field(imm2).tag = imm1;
+    stack.emplace_back(result);
+    NEXT;
+}
 
 I_STI:
     goto I_unsupported;
@@ -947,7 +1031,7 @@ I_STA: {
 
     case heap_object::ARRAY:
     case heap_object::SEXP:
-        obj->get_field(index) = x;
+        obj->field(index) = x;
         break;
     }
 
@@ -979,7 +1063,8 @@ I_DROP:
     NEXT;
 
 I_DUP:
-    goto I_unsupported;
+    stack.push_back(stack.back());
+    NEXT;
 
 I_SWAP:
     goto I_unsupported;
@@ -1009,7 +1094,7 @@ I_ELEM: {
 
     case heap_object::ARRAY:
     case heap_object::SEXP:
-        result = obj->get_field(index);
+        result = obj->field(index);
         break;
     }
 
@@ -1081,11 +1166,12 @@ I_CJMPnz: {
 }
 
 I_BEGIN: {
-    auto imm = read_from_bytes<uint32_t[2]>((ip++)->args);
-    auto * const act = activation::create(current_activation, rip, imm[0] + imm[1]);
+    const int32_t imm1 = (ip++)->num; // args
+    const int32_t imm2 = (ip++)->num; // locals
+    auto * const act = activation::create(current_activation, rip, imm1 + imm2);
     rip = nullptr;
 
-    for (std::size_t i = imm[0]; i > 0; --i) {
+    for (std::size_t i = imm1; i > 0; --i) {
         act->local(i - 1) = stack.back();
         stack.pop_back();
     }
@@ -1110,8 +1196,26 @@ I_CALL: {
     NEXT;
 }
 
-I_TAG:
-    goto I_unsupported;
+I_TAG: {
+    const char * const imm1 = (ip++)->string;
+    const int32_t imm2 = (ip++)->num;
+
+    const value x = stack.back();
+    stack.pop_back();
+
+    bool result = false;
+    if (heap.is_heap_value(x)) {
+        heap_object * const obj = x.object;
+
+        if (obj->get_kind() == heap_object::SEXP) {
+            result = obj->fields_size == static_cast<uint32_t>(imm2)
+                && obj->field(imm2).tag == imm1;
+        }
+    }
+
+    stack.emplace_back(to_fixnum(result));
+    NEXT;
+}
 
 I_ARRAY:
     goto I_unsupported;
@@ -1173,8 +1277,19 @@ I_CALL_Llength: {
 I_CALL_Lstring:
     goto I_unsupported;
 
-I_CALL_Barray:
-    goto I_unsupported;
+I_CALL_Barray: {
+    const int32_t imm = (ip++)->num;
+
+    auto * const result = heap.alloc(heap_object::ARRAY, imm);
+
+    for (int32_t i = imm - 1; i >= 0; --i) {
+        result->field(i) = stack.back();
+        stack.pop_back();
+    }
+
+    stack.emplace_back(result);
+    NEXT;
+}
 
 I_unsupported: // unsupported instruction
     std::ostringstream os;
