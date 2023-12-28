@@ -160,11 +160,12 @@ union value {
     uint32_t fixnum;
     heap_object * object;
     const char * tag;
-    value ** var;
+    value * var;
 
     value() noexcept = default;
     explicit value(uint32_t fixnum) noexcept: fixnum(fixnum) {}
     explicit value(heap_object * object) noexcept: object(object) {}
+    explicit value(value * var) noexcept: var(var) {}
 };
 
 // converted code
@@ -740,7 +741,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 if (idx_ins_meta.converted) {
                     converted[converted_idx++].code = idx_ins_meta.converted;
                 } else {
-                    idx_ins_meta.forward_ptrs.push_back(&converted[converted_idx]);
+                    idx_ins_meta.forward_ptrs.emplace_back(&converted[converted_idx]);
                     converted[converted_idx++].code = converted_base + 1;
                 }
 
@@ -1062,36 +1063,46 @@ I_STA: {
     const value x = stack.back();
     stack.pop_back();
 
-    const int32_t index = from_fixnum(stack.back().fixnum);
+    const value index_value = stack.back();
     stack.pop_back();
 
-    const value xs = stack.back();
-    stack.pop_back();
+    if (is_fixnum(index_value.fixnum)) {
+        const int32_t index = from_fixnum(index_value.fixnum);
 
-    heap.assert_heap_value(xs);
+        const value xs = stack.back();
+        stack.pop_back();
 
-    heap_object * const obj = xs.object;
+        heap.assert_heap_value(xs);
 
-    if (index < 0 || static_cast<std::size_t>(index) >= obj->fields_size) {
-        throw std::invalid_argument { "index is out of range" };
-    }
+        heap_object * const obj = xs.object;
 
-    switch (obj->get_kind()) {
-    case heap_object::STRING:
-        if (!is_fixnum(x.fixnum)) {
-            throw std::invalid_argument { "cannon assign non-integral value in string" };
+        if (index < 0 || static_cast<std::size_t>(index) >= obj->fields_size) {
+            throw std::invalid_argument { "index is out of range" };
         }
 
-        reinterpret_cast<int8_t *>(&obj->field(0))[index] = from_fixnum(x.fixnum);
-        break;
+        switch (obj->get_kind()) {
+        case heap_object::STRING:
+            if (!is_fixnum(x.fixnum)) {
+                throw std::invalid_argument { "cannon assign non-integral value in string" };
+            }
 
-    case heap_object::ARRAY:
-    case heap_object::SEXP:
-        obj->field(index) = x;
-        break;
+            reinterpret_cast<int8_t *>(&obj->field(0))[index] = from_fixnum(x.fixnum);
+            break;
+
+        case heap_object::ARRAY:
+        case heap_object::SEXP:
+            obj->field(index) = x;
+            break;
+        }
+    } else {
+        if (heap.is_heap_value(index_value)) {
+            throw std::invalid_argument { "invalid assignment target" };
+        }
+
+        *index_value.var = x;
     }
 
-    stack.push_back(x);
+    stack.emplace_back(x);
     NEXT;
 }
 
@@ -1119,7 +1130,7 @@ I_DROP:
     NEXT;
 
 I_DUP:
-    stack.push_back(stack.back());
+    stack.emplace_back(stack.back());
     NEXT;
 
 I_SWAP:
@@ -1160,24 +1171,30 @@ I_ELEM: {
 
 I_LD_G: {
     auto * const imm = (ip++)->global;
-    stack.push_back(*imm);
+    stack.emplace_back(*imm);
     NEXT;
 }
 
 I_LD_AL: {
     const std::size_t imm = (ip++)->index;
-    stack.push_back(current_activation->local(imm));
+    stack.emplace_back(current_activation->local(imm));
     NEXT;
 }
 
 I_LD_C:
     goto I_unsupported;
 
-I_LDA_G:
-    goto I_unsupported;
+I_LDA_G: {
+    auto * const imm = (ip++)->global;
+    stack.emplace_back(imm);
+    NEXT;
+}
 
-I_LDA_AL:
-    goto I_unsupported;
+I_LDA_AL: {
+    const std::size_t imm = (ip++)->index;
+    stack.emplace_back(&current_activation->local(imm));
+    NEXT;
+}
 
 I_LDA_C:
     goto I_unsupported;
