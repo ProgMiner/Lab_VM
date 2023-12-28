@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <stack>
+#include <list>
 
 
 /* Bytecode file layout
@@ -165,6 +166,14 @@ struct activation {
     }
 };
 
+struct instruction_meta {
+
+    const CC * converted = nullptr;
+    std::size_t function_idx = UINT32_MAX;
+    std::size_t stack_depth = UINT32_MAX;
+    std::list<CC *> forward_ptrs;
+};
+
 
 static std::ofstream log_file { "./log.txt" };
 
@@ -197,7 +206,7 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
     std::ifstream bytecode_file { filename, std::ios::in | std::ios::binary | std::ios::ate };
 
     if (!bytecode_file) {
-        throw std::invalid_argument { "Cannot open file" };
+        throw std::invalid_argument { "cannot open file" };
     }
 
     const std::size_t bytecode_file_size = bytecode_file.tellg();
@@ -234,14 +243,12 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
 }
 
 static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
-    std::shared_ptr<CC[]> converted {
+    std::unique_ptr<CC[], std::default_delete<CC[]>> converted {
         new CC[bytecode->code_size],
-        std::default_delete<CC[]> {},
     };
 
-    std::shared_ptr<value[]> global_area {
+    std::unique_ptr<value[], std::default_delete<value[]>> global_area {
         new value[bytecode->global_size],
-        std::default_delete<value[]> {},
     };
 
     const CC * const converted_base = converted.get();
@@ -310,13 +317,20 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         interpreter_ptrs[IC::CALL_Barray] = &&I_CALL_Barray;
 
         converted[0].interpreter = &&finish;
+        converted[1].interpreter = &&bad_jump;
+
+        // array must be initialized
+        std::unique_ptr<
+            instruction_meta[],
+            std::default_delete<instruction_meta[]>
+        > instructions_meta { new instruction_meta[bytecode->code_size] {} };
 
         std::size_t current_function_idx = UINT32_MAX;
         std::size_t current_function_args = 0;
         std::size_t current_function_locals = 0;
 
         std::size_t bytecode_idx = 0;
-        std::size_t converted_idx = 1;
+        std::size_t converted_idx = 2;
         while (bytecode_idx < bytecode->code_size) {
             const IC code = static_cast<IC>(bytecode->code_ptr[bytecode_idx++]);
 
@@ -324,6 +338,13 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                      << " (0x" << converted_idx
                      << "). 0x" << code << std::dec
                      << std::endl;
+
+            instruction_meta & ins_meta = instructions_meta[bytecode_idx - 1];
+            ins_meta.converted = converted_base + converted_idx;
+
+            for (CC * forward : ins_meta.forward_ptrs) {
+                forward->code = ins_meta.converted;
+            }
 
             if ((0xF0 & code) == 0xF0) {
                 break;
@@ -370,28 +391,54 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
 
             // string arg
-            case STRING:
-                converted[converted_idx++].string = bytecode->string_ptr
-                    + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
+            case STRING: {
+                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
+                if (idx >= bytecode->string_size) {
+                    throw std::invalid_argument { "pointer to string out of range" };
+                }
+
+                converted[converted_idx++].string = bytecode->string_ptr + idx;
                 break;
+            }
 
             // offset in code arg
             case JMP:
             case CJMPz:
             case CJMPnz:
-                // TODO convert bytecode offset to converted offset
+            case CALL: {
+                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
+                if (idx >= bytecode->code_size) {
+                    throw std::invalid_argument { "pointer to bytecode out of range" };
+                }
 
-                converted[converted_idx++].code = converted_base
-                    + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
+                auto & idx_ins_meta = instructions_meta[idx];
+
+                if (idx_ins_meta.converted) {
+                    converted[converted_idx++].code = idx_ins_meta.converted;
+                } else {
+                    idx_ins_meta.forward_ptrs.push_back(&converted[converted_idx]);
+                    converted[converted_idx++].code = converted_base + 1;
+                }
+
+                if (code == CALL) { // ignore second arg
+                    bytecode_idx += 4;
+                }
+
                 break;
+            }
 
             // G(int) arg
             case LD_G:
             case LDA_G:
-            case ST_G:
-                converted[converted_idx++].global = global_area_base
-                    + read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
+            case ST_G: {
+                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
+                if (idx >= bytecode->code_size) {
+                    throw std::invalid_argument { "global index out of range" };
+                }
+
+                converted[converted_idx++].global = global_area_base + idx;
                 break;
+            }
 
             // A(int) arg
             case LD_A:
@@ -442,7 +489,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case SEXP:
             case BEGIN:
             case CBEGIN:
-            case CALL:
             case TAG:
             case FAIL:
                 converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
@@ -468,7 +514,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         }
 
         if ((bytecode->code_ptr[bytecode_idx - 1] & 0xF0) != 0xF0) {
-            throw std::invalid_argument { "No <end> at end of bytecode" };
+            throw std::invalid_argument { "no <end> at end of bytecode" };
             return;
         }
     }
@@ -476,7 +522,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 #define NEXT do { goto *(*ip++).interpreter; } while (false)
 
     activation * current_activation = nullptr;
-    const CC * ip = converted_base + 1;
+    const CC * ip = converted_base + 2;
     const CC * rip = converted_base; // TODO set in CALL and CALLC
 
     std::stack<activation *> activations;
@@ -650,8 +696,11 @@ I_STI:
 I_STA:
     goto I_unsupported;
 
-I_JMP:
-    goto I_unsupported;
+I_JMP: {
+    auto * const imm = (ip++)->code;
+    ip = imm;
+    NEXT;
+}
 
 I_END: {
     activations.pop();
@@ -685,8 +734,11 @@ I_LD_G: {
     NEXT;
 }
 
-I_LD_AL:
-    goto I_unsupported;
+I_LD_AL: {
+    const std::size_t imm = (ip++)->index;
+    stack.push(current_activation->local(imm));
+    NEXT;
+}
 
 I_LD_C:
     goto I_unsupported;
@@ -706,17 +758,38 @@ I_ST_G: {
     NEXT;
 }
 
-I_ST_AL:
-    goto I_unsupported;
+I_ST_AL: {
+    const std::size_t imm = (ip++)->index;
+    current_activation->local(imm) = stack.top();
+    NEXT;
+}
 
 I_ST_C:
     goto I_unsupported;
 
-I_CJMPz:
-    goto I_unsupported;
+I_CJMPz: {
+    auto * const imm = (ip++)->code;
+    const int32_t x = from_fixnum(stack.top().fixnum);
+    stack.pop();
 
-I_CJMPnz:
-    goto I_unsupported;
+    if (x == 0) {
+        ip = imm;
+    }
+
+    NEXT;
+}
+
+I_CJMPnz: {
+    auto * const imm = (ip++)->code;
+    const int32_t x = from_fixnum(stack.top().fixnum);
+    stack.pop();
+
+    if (x != 0) {
+        ip = imm;
+    }
+
+    NEXT;
+}
 
 I_BEGIN: {
     auto imm = read_from_bytes<uint32_t[2]>((ip++)->args);
@@ -742,8 +815,12 @@ I_CLOSURE:
 I_CALLC:
     goto I_unsupported;
 
-I_CALL:
-    goto I_unsupported;
+I_CALL: {
+    auto * const imm = (ip++)->code;
+    rip = ip;
+    ip = imm;
+    NEXT;
+}
 
 I_TAG:
     goto I_unsupported;
@@ -810,6 +887,9 @@ I_unsupported: // unsupported instruction
 
     os << "Unsupported instruction at 0x" << std::hex << ip - converted_base - 1;
     throw std::invalid_argument { os.str() };
+
+bad_jump: // unresolved jump
+    throw std::invalid_argument { "unresolved jump happen" };
 
 #undef NEXT
 }
