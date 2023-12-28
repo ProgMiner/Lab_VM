@@ -298,7 +298,7 @@ struct heap {
         return result;
     }
 
-    bool is_heap_value(value val) noexcept {
+    bool is_heap_value(value val) const noexcept {
         if (is_fixnum(val.fixnum)) {
             return false;
         }
@@ -311,7 +311,7 @@ struct heap {
         return true;
     }
 
-    void assert_heap_value(value val) {
+    void assert_heap_value(value val) const {
         if (!is_heap_value(val)) {
             throw std::invalid_argument { "argument is not heap value" };
         }
@@ -438,6 +438,62 @@ static int32_t from_fixnum(uint32_t x) noexcept {
 
 static bool is_fixnum(uint32_t x) noexcept {
     return (x & 1) != 0;
+}
+
+static void value_to_string(const struct heap & heap, value v, std::ostringstream & result) {
+    if (is_fixnum(v.fixnum)) {
+        result << from_fixnum(v.fixnum);
+        return;
+    }
+
+    if (!heap.is_heap_value(v)) {
+        throw std::invalid_argument { "unsupported value" };
+    }
+
+    heap_object * const obj = v.object;
+    const std::size_t fields = obj->fields_size;
+
+    switch (obj->get_kind()) {
+    case heap_object::STRING:
+        result << '"' << reinterpret_cast<const char *>(&obj->field(0)) << '"';
+        break;
+
+    case heap_object::ARRAY:
+        if (fields == 0) {
+            result << "[]";
+        } else {
+            result << '[';
+            value_to_string(heap, obj->field(0), result);
+
+            for (std::size_t i = 1; i < fields; ++i) {
+                result << ", ";
+
+                value_to_string(heap, obj->field(i), result);
+            }
+
+            result << ']';
+        }
+
+        break;
+
+    case heap_object::SEXP:
+        result << obj->field(fields).tag;
+
+        if (fields > 0) {
+            result << " (";
+            value_to_string(heap, obj->field(0), result);
+
+            for (std::size_t i = 1; i < fields; ++i) {
+                result << ", ";
+
+                value_to_string(heap, obj->field(i), result);
+            }
+
+            result << ')';
+        }
+
+        break;
+    }
 }
 
 template<typename T>
@@ -977,7 +1033,7 @@ I_STRING: {
 
     auto * const result = heap.alloc(heap_object::STRING, str_size);
 
-    std::memcpy(reinterpret_cast<uint8_t *>(result) + sizeof(heap_object), str, str_size);
+    std::memcpy(reinterpret_cast<char *>(&result->field(0)), str, str_size);
 
     stack.emplace_back(result);
     NEXT;
@@ -1026,7 +1082,7 @@ I_STA: {
             throw std::invalid_argument { "cannon assign non-integral value in string" };
         }
 
-        reinterpret_cast<uint8_t *>(obj)[sizeof(heap_object) + index] = from_fixnum(x.fixnum);
+        reinterpret_cast<int8_t *>(&obj->field(0))[index] = from_fixnum(x.fixnum);
         break;
 
     case heap_object::ARRAY:
@@ -1088,7 +1144,7 @@ I_ELEM: {
     switch (obj->get_kind()) {
     case heap_object::STRING:
         result = value {
-            to_fixnum(reinterpret_cast<uint8_t *>(obj)[sizeof(heap_object) + index]),
+            to_fixnum(reinterpret_cast<int8_t *>(&obj->field(0))[index]),
         };
         break;
 
@@ -1274,8 +1330,24 @@ I_CALL_Llength: {
     NEXT;
 }
 
-I_CALL_Lstring:
-    goto I_unsupported;
+I_CALL_Lstring: {
+    const value x = stack.back();
+
+    {
+        std::ostringstream os;
+        value_to_string(heap, x, os);
+
+        const std::string str = std::move(os).str();
+
+        auto * const result = heap.alloc(heap_object::STRING, str.size());
+
+        std::memcpy(reinterpret_cast<char *>(&result->field(0)), str.data(), str.size());
+
+        stack.emplace_back(result);
+    }
+
+    NEXT;
+}
 
 I_CALL_Barray: {
     const int32_t imm = (ip++)->num;
