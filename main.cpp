@@ -1379,7 +1379,7 @@ I_CLOSURE: {
     auto * const result = heap.alloc(heap_object::CLOSURE, imm2);
     result->field(imm2).code = imm1;
 
-    uint32_t locs;
+    uint32_t locs = 0;
     for (std::size_t i = 0; i < imm2; ++i) {
         if (i % 16 == 0) {
             locs = (ip++)->locs;
@@ -1453,32 +1453,108 @@ I_TAG: {
     NEXT;
 }
 
-I_ARRAY:
-    goto I_unsupported;
+I_ARRAY: {
+    const int32_t imm = (ip++)->num;
+
+    const value x = stack.back();
+    stack.pop_back();
+
+    bool result = false;
+    if (heap.is_heap_value(x)) {
+        heap_object * const obj = x.object;
+
+        if (obj->get_kind() == heap_object::ARRAY) {
+            result = obj->fields_size == static_cast<uint32_t>(imm);
+        }
+    }
+
+    stack.emplace_back(to_fixnum(result));
+    NEXT;
+}
 
 I_FAIL:
     goto I_unsupported;
 
-I_PATT_str:
-    goto I_unsupported;
+I_PATT_str: {
+    const value x = stack.back();
+    stack.pop_back();
 
-I_PATT_string:
-    goto I_unsupported;
+    const value y = stack.back();
+    stack.pop_back();
 
-I_PATT_array:
-    goto I_unsupported;
+    bool result = false;
+    if (heap.is_heap_value(y)) {
+        heap_object * const y_obj = y.object;
 
-I_PATT_sexp:
-    goto I_unsupported;
+        if (y_obj->get_kind() == heap_object::STRING) {
+            heap.assert_heap_value(x);
 
-I_PATT_ref:
-    goto I_unsupported;
+            heap_object * const x_obj = x.object;
+            if (x_obj->get_kind() != heap_object::STRING) {
+                throw std::invalid_argument { "argument of PATT =str must be string" };
+            }
 
-I_PATT_val:
-    goto I_unsupported;
+            const std::size_t str_size = x_obj->fields_size;
+            result = y_obj->fields_size == str_size
+                && std::memcmp(&y_obj->field(0), &x_obj->field(0), str_size) == 0;
+        }
+    }
 
-I_PATT_fun:
-    goto I_unsupported;
+    stack.emplace_back(to_fixnum(result));
+    NEXT;
+}
+
+I_PATT_string: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    const bool result = heap.is_heap_value(x) && x.object->kind == heap_object::STRING;
+    stack.emplace_back(to_fixnum(result));
+    NEXT;
+}
+
+I_PATT_array: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    const bool result = heap.is_heap_value(x) && x.object->kind == heap_object::ARRAY;
+    stack.emplace_back(to_fixnum(result));
+    NEXT;
+}
+
+I_PATT_sexp: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    const bool result = heap.is_heap_value(x) && x.object->kind == heap_object::SEXP;
+    stack.emplace_back(to_fixnum(result));
+    NEXT;
+}
+
+I_PATT_ref: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    stack.emplace_back(to_fixnum(heap.is_heap_value(x)));
+    NEXT;
+}
+
+I_PATT_val: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    stack.emplace_back(to_fixnum(is_fixnum(x.fixnum)));
+    NEXT;
+}
+
+I_PATT_fun: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    const bool result = heap.is_heap_value(x) && x.object->kind == heap_object::CLOSURE;
+    stack.emplace_back(to_fixnum(result));
+    NEXT;
+}
 
 I_CALL_Lread: {
     std::cout << "> ";
