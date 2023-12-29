@@ -249,7 +249,7 @@ struct heap {
     std::size_t offset = 0;
     std::size_t size;
 
-    static inline constexpr const std::size_t INITIAL_SIZE = 4096;
+    static inline constexpr const std::size_t INITIAL_SIZE = 4 * 1024;
     static inline constexpr const std::size_t ALIGNMENT = 16;
 
     heap(
@@ -991,6 +991,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     bool from_callc = false;
 
     std::vector<value> stack;
+    stack.reserve(128);
     stack.emplace_back(); // argc
     stack.emplace_back(); // argv
     stack.emplace_back(); // envp (failsafe)

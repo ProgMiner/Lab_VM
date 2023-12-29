@@ -2,8 +2,9 @@
 CXX = g++
 LD = g++
 # CXXFLAGS = -std=c++17 -Wall -Werror -g -O0 -DDEBUG -fsanitize=address
-CXXFLAGS = -std=c++17 -Wall -Werror -Ofast -fsanitize=address
-LDFLAGS = -fsanitize=address
+CXXFLAGS = -std=c++17 -Wall -Werror -Ofast
+# LDFLAGS = -fsanitize=address
+LDFLAGS =
 
 BUILDPATH = build
 SOURCES = main.cpp
