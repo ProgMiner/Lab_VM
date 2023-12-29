@@ -658,6 +658,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         std::size_t current_function_idx = UINT32_MAX;
         std::size_t current_function_args = 0;
         std::size_t current_function_locals = 0;
+        bool current_function_closure = false;
 
         std::size_t bytecode_idx = 0;
         std::size_t converted_idx = 2;
@@ -691,10 +692,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 current_function_idx = converted_idx;
                 current_function_args = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx);
                 current_function_locals = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx + 4);
+                current_function_closure = code == IC::CBEGIN;
             } else if (code == IC::END) {
                 current_function_idx = UINT32_MAX;
                 current_function_args = 0;
                 current_function_locals = 0;
+                current_function_closure = false;
             }
 
             const void * interpreter_ptr = interpreter_ptrs[code];
@@ -710,7 +713,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check is BEGIN or CBEGIN in CLOSURE
             // TODO check labels accessed from same function
             // TODO check stack depth at END is 1
-            // TODO check C(_) loc only in CBEGIN
             // TODO check index of C(_) loc
 
 #define NAT_ARG(__var) do { \
@@ -782,6 +784,14 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     __var = _idx + current_function_args; \
 } while (false)
 
+#define LOC_C_ARG(__var) do { \
+    if (!current_function_closure) { \
+        throw std::invalid_argument { "cannot use closured values outside of closure" }; \
+    } \
+\
+    __var = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+} while (false)
+
             switch (code) {
 
             // fixnum arg
@@ -840,7 +850,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case IC::LD_C:
             case IC::LDA_C:
             case IC::ST_C:
-                NAT_ARG(converted[converted_idx++].num);
+                LOC_C_ARG(converted[converted_idx++].index);
                 break;
 
             // nat, nat args
@@ -899,10 +909,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     const uint8_t loc = read_from_bytes<uint8_t>(bytecode->code_ptr, bytecode_idx);
                     locs[i % 16] = loc;
 
-                    if (loc > 3) {
-                        throw std::invalid_argument { "unsupported loc in closure" };
-                    }
-
                     switch (loc) {
                     case 0:
                         LOC_G_ARG(converted[converted_idx++].global);
@@ -917,8 +923,11 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                         break;
 
                     case 3:
-                        NAT_ARG(converted[converted_idx++].num);
+                        LOC_C_ARG(converted[converted_idx++].index);
                         break;
+
+                    default:
+                        throw std::invalid_argument { "unsupported loc in closure" };
                     }
                 }
 
@@ -946,6 +955,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 #undef LOC_G_ARG
 #undef LOC_A_ARG
 #undef LOC_L_ARG
+#undef LOC_C_ARG
         }
 
         if ((bytecode->code_ptr[bytecode_idx - 1] & 0xF0) != 0xF0) {
