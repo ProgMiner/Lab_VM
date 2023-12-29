@@ -795,6 +795,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
 
             // nat arg
+            case IC::CALLC:
             case IC::ARRAY:
             case IC::CALL_Barray:
                 NAT_ARG(converted[converted_idx++].num);
@@ -937,10 +938,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
                 break;
             }
-
-            case IC::CALLC: // ignore arg
-                bytecode_idx += sizeof(uint32_t);
-                break;
 
             // no args
             default:
@@ -1358,11 +1355,15 @@ I_BEGIN: {
     const int32_t imm2 = (ip++)->num; // locals
     auto * const act = activation::create(current_activation, rip, imm1 + imm2, value { cp });
     rip = nullptr;
-    cp = nullptr;
 
     for (std::size_t i = imm1; i > 0; --i) {
         act->local(i - 1) = stack.back();
         stack.pop_back();
+    }
+
+    if (cp) {
+        stack.pop_back();
+        cp = nullptr;
     }
 
     current_activation = act;
@@ -1408,8 +1409,9 @@ I_CLOSURE: {
 }
 
 I_CALLC: {
-    const value x = stack.back();
-    stack.pop_back();
+    const int32_t imm = (ip++)->num;
+
+    const value x = stack[stack.size() - 1 - imm];
 
     heap.assert_heap_value(x);
 
