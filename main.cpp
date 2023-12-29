@@ -249,6 +249,9 @@ struct heap {
     std::size_t offset = 0;
     std::size_t size;
 
+    static inline constexpr const std::size_t INITIAL_SIZE = 4096;
+    static inline constexpr const std::size_t ALIGNMENT = 16;
+
     heap(
         value * global_area,
         std::size_t global_area_size,
@@ -259,10 +262,10 @@ struct heap {
         , global_area_size(global_area_size)
         , stack(stack)
         , current_activation(current_activation)
-        , buffer(new uint8_t[32])
+        , buffer(new uint8_t[INITIAL_SIZE])
         , first_half(buffer.get())
-        , second_half(first_half + 16)
-        , size(32)
+        , second_half(first_half + INITIAL_SIZE / 2)
+        , size(INITIAL_SIZE)
     {
         if (!buffer) {
             throw std::bad_alloc {};
@@ -270,7 +273,7 @@ struct heap {
     }
 
     static constexpr std::size_t align_size(std::size_t size) noexcept {
-        return (size + 15) / 16 * 16;
+        return (size + (ALIGNMENT - 1)) / ALIGNMENT * ALIGNMENT;
     }
 
     static constexpr std::size_t get_object_size(
