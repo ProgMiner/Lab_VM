@@ -604,7 +604,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         interpreter_ptrs[IC::STA] = &&I_STA;
         interpreter_ptrs[IC::JMP] = &&I_JMP;
         interpreter_ptrs[IC::END] = &&I_END;
-        interpreter_ptrs[IC::RET] = &&I_RET;
+        interpreter_ptrs[IC::RET] = &&I_END;
         interpreter_ptrs[IC::DROP] = &&I_DROP;
         interpreter_ptrs[IC::DUP] = &&I_DUP;
         interpreter_ptrs[IC::SWAP] = &&I_SWAP;
@@ -717,6 +717,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check is BEGIN or CBEGIN in CLOSURE
             // TODO check stack depth at END is 1
             // TODO check index of C(_) loc
+            // TODO check CBEGIN is only in CLOSURE
 
 #define NAT_ARG(__var) do { \
     const int32_t _imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
@@ -984,9 +985,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     activation * current_activation = nullptr;
     const CC * ip = converted_base + 2;
     const CC * rip = converted_base;
-
-    // ATTENTION: do not call GC between CALLC and CBEGIN
-    heap_object * cp = nullptr;
+    bool from_callc = false;
 
     std::vector<value> stack;
     stack.emplace_back(); // argc
@@ -1245,9 +1244,6 @@ I_END: {
     NEXT;
 }
 
-I_RET:
-    goto I_unsupported;
-
 I_DROP:
     stack.pop_back();
     NEXT;
@@ -1256,8 +1252,12 @@ I_DUP:
     stack.emplace_back(stack.back());
     NEXT;
 
-I_SWAP:
-    goto I_unsupported;
+I_SWAP: {
+    const std::size_t i = stack.size() - 2;
+
+    std::swap(stack[i], stack[i + 1]);
+    NEXT;
+}
 
 I_ELEM: {
     const int32_t index = from_fixnum(stack.back().fixnum);
@@ -1381,9 +1381,9 @@ I_BEGIN: {
         stack.pop_back();
     }
 
-    if (cp) {
+    if (from_callc) {
         stack.pop_back();
-        cp = nullptr;
+        from_callc = false;
     }
 
     current_activation = act;
@@ -1394,7 +1394,6 @@ I_CBEGIN: {
     const int32_t imm1 = (ip++)->num; // args
     const int32_t imm2 = (ip++)->num; // locals
     auto * const act = activation::create(current_activation, rip, imm1 + imm2);
-    act->closure = value { cp };
     rip = nullptr;
 
     for (std::size_t i = imm1; i > 0; --i) {
@@ -1402,12 +1401,11 @@ I_CBEGIN: {
         stack.pop_back();
     }
 
-    if (cp) {
-        stack.pop_back();
-        cp = nullptr;
-    }
+    act->closure = value { stack.back() };
+    stack.pop_back();
 
     current_activation = act;
+    from_callc = false;
     NEXT;
 }
 
@@ -1455,7 +1453,6 @@ I_CALLC: {
     heap.assert_heap_value(x);
 
     heap_object * const obj = x.object;
-    cp = obj;
 
     if (obj->get_kind() != heap_object::CLOSURE) {
         throw std::invalid_argument { "cannot call value as closure" };
@@ -1463,6 +1460,7 @@ I_CALLC: {
 
     rip = ip;
     ip = obj->field(obj->fields_size).code;
+    from_callc = true;
     NEXT;
 }
 
@@ -1513,8 +1511,20 @@ I_ARRAY: {
     NEXT;
 }
 
-I_FAIL:
+I_FAIL: {
+    const int32_t imm1 = (ip++)->num; // line
+    const int32_t imm2 = (ip++)->num; // column
+
+    const value x = stack.back();
+    stack.pop_back();
+
+    std::ostringstream os;
+    os << "match failure at " << imm1 << ':' << imm2 << ", value: ";
+    value_to_string(heap, x, os);
+
+    throw std::out_of_range { os.str() };
     goto I_unsupported;
+}
 
 I_PATT_str: {
     const value x = stack.back();
@@ -1695,5 +1705,11 @@ int main(int argc, char * argv[]) {
     }
 #endif
 
-    interpret(bytecode);
+    try {
+        interpret(bytecode);
+    } catch (const std::invalid_argument & e) {
+        std::cerr << "Ill-formed bytecode: " << e.what() << std::endl;
+    } catch (const std::out_of_range & e) {
+        std::cerr << "Runtime failure: " << e.what() << std::endl;
+    }
 }
