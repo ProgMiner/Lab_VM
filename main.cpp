@@ -674,9 +674,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             instruction_meta & ins_meta = instructions_meta[bytecode_idx - 1];
             ins_meta.converted = converted_base + converted_idx;
+            ins_meta.function_idx = current_function_idx;
 
             for (CC * forward : ins_meta.forward_ptrs) {
                 forward->code = ins_meta.converted;
+
+                // TODO check labels accessed from same function
             }
 
             if ((0xF0 & code) == 0xF0) {
@@ -693,6 +696,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 current_function_args = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx);
                 current_function_locals = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx + 4);
                 current_function_closure = code == IC::CBEGIN;
+                ins_meta.function_idx = current_function_idx;
             } else if (code == IC::END) {
                 current_function_idx = UINT32_MAX;
                 current_function_args = 0;
@@ -711,7 +715,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check negative stack depth
             // TODO check is BEGIN after CALL
             // TODO check is BEGIN or CBEGIN in CLOSURE
-            // TODO check labels accessed from same function
             // TODO check stack depth at END is 1
             // TODO check index of C(_) loc
 
@@ -733,7 +736,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     __var = bytecode->string_ptr + _idx; \
 } while (false)
 
-#define CODE_PTR_ARG(__var) do { \
+#define CODE_PTR_ARG(__var, __jump) do { \
     const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
     if (_idx >= bytecode->code_size) { \
         throw std::invalid_argument { "pointer to bytecode out of range" }; \
@@ -742,6 +745,10 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     auto & _idx_ins_meta = instructions_meta[_idx]; \
 \
     if (_idx_ins_meta.converted) { \
+        if ((__jump) && _idx_ins_meta.function_idx != current_function_idx) { \
+            throw std::invalid_argument { "attempt to jump to another function" }; \
+        } \
+\
         __var = _idx_ins_meta.converted; \
     } else { \
         _idx_ins_meta.forward_ptrs.emplace_back(&converted[converted_idx]); \
@@ -816,13 +823,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case IC::JMP:
             case IC::CJMPz:
             case IC::CJMPnz:
-            case IC::CALL:
-                CODE_PTR_ARG(converted[converted_idx++].code);
-
-                if (code == IC::CALL) { // ignore second arg
-                    bytecode_idx += 4;
-                }
-
+                CODE_PTR_ARG(converted[converted_idx++].code, true);
                 break;
 
             // G(int) arg
@@ -879,7 +880,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             case IC::CLOSURE: {
-                CODE_PTR_ARG(converted[converted_idx++].code);
+                CODE_PTR_ARG(converted[converted_idx++].code, false);
 
                 const uint32_t n = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
                 if (bytecode_idx + n * 5 > bytecode->code_size) {
@@ -943,6 +944,13 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
                 break;
             }
+
+            case IC::CALL:
+                CODE_PTR_ARG(converted[converted_idx++].code, false);
+
+                // ignore second arg
+                bytecode_idx += 4;
+                break;
 
             // no args
             default:
