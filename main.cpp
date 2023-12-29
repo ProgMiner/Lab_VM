@@ -214,12 +214,7 @@ struct activation {
         );
     }
 
-    static activation * create(
-        activation * parent,
-        const CC * return_ptr,
-        std::size_t locals,
-        value closure
-    ) {
+    static activation * create(activation * parent, const CC * return_ptr, std::size_t locals) {
         auto result = reinterpret_cast<activation *>(
             // zero-initialized
             new uint8_t[sizeof(activation) + sizeof(value) * locals] {}
@@ -228,7 +223,6 @@ struct activation {
         result->parent = parent;
         result->return_ptr = return_ptr;
         result->locals_size = locals;
-        result->closure = closure;
         return result;
     }
 
@@ -713,9 +707,11 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check same stack depth on labels
             // TODO check negative stack depth
             // TODO check is BEGIN after CALL
-            // TODO check is CBEGIN in CLOSURE
+            // TODO check is BEGIN or CBEGIN in CLOSURE
             // TODO check labels accessed from same function
-            // TODO check stack depth at END
+            // TODO check stack depth at END is 1
+            // TODO check C(_) loc only in CBEGIN
+            // TODO check index of C(_) loc
 
 #define NAT_ARG(__var) do { \
     const int32_t _imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
@@ -840,11 +836,11 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 LOC_L_ARG(converted[converted_idx++].index);
                 break;
 
-            // TODO C(int) arg
+            // C(int) arg
             case IC::LD_C:
             case IC::LDA_C:
             case IC::ST_C:
-                bytecode_idx += 4;
+                NAT_ARG(converted[converted_idx++].num);
                 break;
 
             // nat, nat args
@@ -921,7 +917,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                         break;
 
                     case 3:
-                        throw std::invalid_argument { "unsupported C(n) loc" }; // TODO
+                        NAT_ARG(converted[converted_idx++].num);
                         break;
                     }
                 }
@@ -1293,8 +1289,11 @@ I_LD_AL: {
     NEXT;
 }
 
-I_LD_C:
-    goto I_unsupported;
+I_LD_C: {
+    const std::size_t imm = (ip++)->index;
+    stack.emplace_back(current_activation->closure.object->field(imm));
+    NEXT;
+}
 
 I_LDA_G: {
     auto * const imm = (ip++)->global;
@@ -1323,8 +1322,11 @@ I_ST_AL: {
     NEXT;
 }
 
-I_ST_C:
-    goto I_unsupported;
+I_ST_C: {
+    const std::size_t imm = (ip++)->index;
+    current_activation->closure.object->field(imm) = stack.back();
+    NEXT;
+}
 
 I_CJMPz: {
     auto * const imm = (ip++)->code;
@@ -1353,7 +1355,7 @@ I_CJMPnz: {
 I_BEGIN: {
     const int32_t imm1 = (ip++)->num; // args
     const int32_t imm2 = (ip++)->num; // locals
-    auto * const act = activation::create(current_activation, rip, imm1 + imm2, value { cp });
+    auto * const act = activation::create(current_activation, rip, imm1 + imm2);
     rip = nullptr;
 
     for (std::size_t i = imm1; i > 0; --i) {
@@ -1370,8 +1372,26 @@ I_BEGIN: {
     NEXT;
 }
 
-I_CBEGIN:
-    goto I_unsupported;
+I_CBEGIN: {
+    const int32_t imm1 = (ip++)->num; // args
+    const int32_t imm2 = (ip++)->num; // locals
+    auto * const act = activation::create(current_activation, rip, imm1 + imm2);
+    act->closure = value { cp };
+    rip = nullptr;
+
+    for (std::size_t i = imm1; i > 0; --i) {
+        act->local(i - 1) = stack.back();
+        stack.pop_back();
+    }
+
+    if (cp) {
+        stack.pop_back();
+        cp = nullptr;
+    }
+
+    current_activation = act;
+    NEXT;
+}
 
 I_CLOSURE: {
     auto * const imm1 = (ip++)->code;
@@ -1399,7 +1419,8 @@ I_CLOSURE: {
             result->field(i) = current_activation->local((ip++)->index);
             break;
 
-        case 3: // TODO C(x)
+        case 3: // C(x)
+            result->field(i) = current_activation->closure.object->field((ip++)->index);
             break;
         }
     }
