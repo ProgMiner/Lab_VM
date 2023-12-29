@@ -123,7 +123,9 @@ enum IC {
 }
 
 
+#ifdef DEBUG
 static std::ofstream log_file { "./log.txt" };
+#endif
 
 
 union value;
@@ -132,9 +134,10 @@ struct heap_object {
 
     enum object_kind {
 
-        STRING = 0,
-        ARRAY  = 1,
-        SEXP   = 2,
+        STRING  = 0,
+        ARRAY   = 1,
+        SEXP    = 2,
+        CLOSURE = 3,
     };
 
     uint8_t kind;
@@ -145,6 +148,7 @@ struct heap_object {
         case STRING:
         case ARRAY:
         case SEXP:
+        case CLOSURE:
             return static_cast<object_kind>(kind);
 
         default:
@@ -155,11 +159,14 @@ struct heap_object {
     value & field(std::size_t idx) noexcept;
 };
 
+union CC;
+
 union value {
 
     uint32_t fixnum;
     heap_object * object;
     const char * tag;
+    const CC * code;
     value * var;
 
     value() noexcept = default;
@@ -179,7 +186,7 @@ union CC {
     const CC * code;
     value * global;
     uint32_t index;
-    const uint8_t * args;
+    uint32_t locs;
 };
 
 static_assert(sizeof(value) == sizeof(void *));
@@ -198,6 +205,7 @@ struct activation {
     activation * parent;
     const CC * return_ptr;
     std::size_t locals_size;
+    value closure;
 
     value & local(std::size_t idx) noexcept {
         return *(
@@ -206,7 +214,12 @@ struct activation {
         );
     }
 
-    static activation * create(activation * parent, const CC * return_ptr, std::size_t locals) {
+    static activation * create(
+        activation * parent,
+        const CC * return_ptr,
+        std::size_t locals,
+        value closure
+    ) {
         auto result = reinterpret_cast<activation *>(
             // zero-initialized
             new uint8_t[sizeof(activation) + sizeof(value) * locals] {}
@@ -215,6 +228,7 @@ struct activation {
         result->parent = parent;
         result->return_ptr = return_ptr;
         result->locals_size = locals;
+        result->closure = closure;
         return result;
     }
 
@@ -277,6 +291,7 @@ struct heap {
             return fields * sizeof(value);
 
         case heap_object::SEXP:
+        case heap_object::CLOSURE:
             return (fields + 1) * sizeof(value);
         }
 
@@ -334,7 +349,9 @@ struct heap {
         std::size_t new_offset = 0;
         std::unordered_map<const heap_object *, heap_object *> moved_objects;
 
+#ifdef DEBUG
         log_file << "Run GC" << std::endl;
+#endif
 
         for (std::size_t i = 0; i < global_area_size; ++i) {
             move_value(global_area[i], new_offset, moved_objects);
@@ -348,6 +365,8 @@ struct heap {
             activation * act = current_activation;
 
             while (act) {
+                move_value(act->closure, new_offset, moved_objects);
+
                 for (std::size_t i = 0; i < act->locals_size; ++i) {
                     move_value(act->local(i), new_offset, moved_objects);
                 }
@@ -384,10 +403,12 @@ struct heap {
 
         std::memcpy(new_ptr, heap_ptr, object_size);
 
+#ifdef DEBUG
         log_file << "Moved object of size " << object_size
                  << ' ' << heap_ptr
                  << " -> " << new_ptr
                  << std::endl;
+#endif
 
         moved_objects[heap_ptr] = new_ptr;
         val.object = new_ptr;
@@ -416,10 +437,12 @@ struct heap {
 
         buffer.reset(new_buffer);
 
+#ifdef DEBUG
         log_file << "Heap grown to " << size
                  << " (" << reinterpret_cast<void *>(first_half)
                  << ", " << reinterpret_cast<void *>(second_half)
                  << ')' << std::endl;
+#endif
     }
 };
 
@@ -493,6 +516,10 @@ static void value_to_string(const struct heap & heap, value v, std::ostringstrea
             result << ')';
         }
 
+        break;
+
+    case heap_object::CLOSURE:
+        // TODO
         break;
     }
 }
@@ -643,10 +670,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         while (bytecode_idx < bytecode->code_size) {
             const auto code = static_cast<IC::IC>(bytecode->code_ptr[bytecode_idx++]);
 
+#ifdef DEBUG
             log_file << "0x" << std::hex << bytecode_idx - 1
                      << " (0x" << converted_idx
                      << "). 0x" << code << std::dec
                      << std::endl;
+#endif
 
             instruction_meta & ins_meta = instructions_meta[bytecode_idx - 1];
             ins_meta.converted = converted_base + converted_idx;
@@ -689,21 +718,72 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check stack depth at END
 
 #define NAT_ARG(__var) do { \
-    const int32_t imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
-    if (imm < 0) { \
+    const int32_t _imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (_imm < 0) { \
         throw std::invalid_argument { "negative argument" }; \
     } \
 \
-    __var = imm; \
+    __var = _imm; \
 } while (false)
 
 #define STRING_ARG(__var) do { \
-    const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
-    if (idx >= bytecode->string_size) { \
+    const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (_idx >= bytecode->string_size) { \
         throw std::invalid_argument { "pointer to string out of range" }; \
     } \
 \
-    __var = bytecode->string_ptr + idx; \
+    __var = bytecode->string_ptr + _idx; \
+} while (false)
+
+#define CODE_PTR_ARG(__var) do { \
+    const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (_idx >= bytecode->code_size) { \
+        throw std::invalid_argument { "pointer to bytecode out of range" }; \
+    } \
+\
+    auto & _idx_ins_meta = instructions_meta[_idx]; \
+\
+    if (_idx_ins_meta.converted) { \
+        __var = _idx_ins_meta.converted; \
+    } else { \
+        _idx_ins_meta.forward_ptrs.emplace_back(&converted[converted_idx]); \
+        __var = converted_base + 1; \
+    } \
+} while (false)
+
+#define LOC_G_ARG(__var) do { \
+    const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (_idx >= bytecode->code_size) { \
+        throw std::invalid_argument { "global index out of range" }; \
+    } \
+\
+    __var = global_area_base + _idx; \
+} while (false)
+
+#define LOC_A_ARG(__var) do { \
+    if (current_function_idx == UINT32_MAX) { \
+        throw std::invalid_argument { "cannot use arguments outside of function" }; \
+    } \
+\
+    const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (_idx >= current_function_args) { \
+        throw std::invalid_argument { "argument index is greater than number of arguments" }; \
+    } \
+\
+    __var = _idx; \
+} while (false)
+
+#define LOC_L_ARG(__var) do { \
+    if (current_function_idx == UINT32_MAX) { \
+        throw std::invalid_argument { "cannot use locals outside of function" }; \
+    } \
+\
+    const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+    if (_idx >= current_function_locals) { \
+        throw std::invalid_argument { "local index is greater than number of locals" }; \
+    } \
+\
+    __var = _idx + current_function_args; \
 } while (false)
 
             switch (code) {
@@ -715,7 +795,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
 
             // nat arg
-            case IC::CALLC:
             case IC::ARRAY:
             case IC::CALL_Barray:
                 NAT_ARG(converted[converted_idx++].num);
@@ -730,78 +809,35 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case IC::JMP:
             case IC::CJMPz:
             case IC::CJMPnz:
-            case IC::CALL: {
-                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-                if (idx >= bytecode->code_size) {
-                    throw std::invalid_argument { "pointer to bytecode out of range" };
-                }
-
-                auto & idx_ins_meta = instructions_meta[idx];
-
-                if (idx_ins_meta.converted) {
-                    converted[converted_idx++].code = idx_ins_meta.converted;
-                } else {
-                    idx_ins_meta.forward_ptrs.emplace_back(&converted[converted_idx]);
-                    converted[converted_idx++].code = converted_base + 1;
-                }
+            case IC::CALL:
+                CODE_PTR_ARG(converted[converted_idx++].code);
 
                 if (code == IC::CALL) { // ignore second arg
                     bytecode_idx += 4;
                 }
 
                 break;
-            }
 
             // G(int) arg
             case IC::LD_G:
             case IC::LDA_G:
-            case IC::ST_G: {
-                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-                if (idx >= bytecode->code_size) {
-                    throw std::invalid_argument { "global index out of range" };
-                }
-
-                converted[converted_idx++].global = global_area_base + idx;
+            case IC::ST_G:
+                LOC_G_ARG(converted[converted_idx++].global);
                 break;
-            }
 
             // A(int) arg
             case IC::LD_A:
             case IC::LDA_A:
-            case IC::ST_A: {
-                if (current_function_idx == UINT32_MAX) {
-                    throw std::invalid_argument { "cannot use arguments outside of function" };
-                }
-
-                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-                if (idx >= current_function_args) {
-                    throw std::invalid_argument {
-                        "argument index is greater than number of arguments"
-                    };
-                }
-
-                converted[converted_idx++].index = idx;
+            case IC::ST_A:
+                LOC_A_ARG(converted[converted_idx++].index);
                 break;
-            }
 
             // L(int) arg
             case IC::LD_L:
             case IC::LDA_L:
-            case IC::ST_L: {
-                if (current_function_idx == UINT32_MAX) {
-                    throw std::invalid_argument { "cannot use locals outside of function" };
-                }
-
-                const std::size_t idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
-                if (idx >= current_function_locals) {
-                    throw std::invalid_argument {
-                        "local index is greater than number of locals"
-                    };
-                }
-
-                converted[converted_idx++].index = idx + current_function_args;
+            case IC::ST_L:
+                LOC_L_ARG(converted[converted_idx++].index);
                 break;
-            }
 
             // TODO C(int) arg
             case IC::LD_C:
@@ -835,17 +871,76 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
             }
 
-            // CLOSURE
             case IC::CLOSURE: {
-                converted[converted_idx++].args = bytecode->code_ptr + bytecode_idx;
+                CODE_PTR_ARG(converted[converted_idx++].code);
 
-                const std::size_t n = read_from_bytes<uint32_t>(
-                    bytecode->code_ptr + bytecode_idx + 4
-                );
+                const uint32_t n = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
+                if (bytecode_idx + n * 5 > bytecode->code_size) {
+                    throw std::invalid_argument { "CLOSURE is out of bytecode size" };
+                }
 
-                bytecode_idx += 8 + n * 5;
+                converted[converted_idx++].index = n;
+
+                uint8_t locs[16] {};
+                std::uint32_t * locs_ptr = nullptr;
+                for (std::size_t i = 0; i < n; ++i) {
+                    if (i % 16 == 0) {
+                        if (i > 0) {
+                            std::uint32_t locs_num = 0;
+
+                            for (int j = 15; j >= 0; --j) {
+                                locs_num = (locs_num << 2) | locs[j];
+                            }
+
+                            *locs_ptr = locs_num;
+                        }
+
+                        locs_ptr = &converted[converted_idx++].locs;
+                        std::memset(locs, 0, sizeof(locs));
+                    }
+
+                    const uint8_t loc = read_from_bytes<uint8_t>(bytecode->code_ptr, bytecode_idx);
+                    locs[i % 16] = loc;
+
+                    if (loc > 3) {
+                        throw std::invalid_argument { "unsupported loc in closure" };
+                    }
+
+                    switch (loc) {
+                    case 0:
+                        LOC_G_ARG(converted[converted_idx++].global);
+                        break;
+
+                    case 1:
+                        LOC_L_ARG(converted[converted_idx++].index);
+                        break;
+
+                    case 2:
+                        LOC_A_ARG(converted[converted_idx++].index);
+                        break;
+
+                    case 3:
+                        throw std::invalid_argument { "unsupported C(n) loc" }; // TODO
+                        break;
+                    }
+                }
+
+                if (n > 0) {
+                    std::uint32_t locs_num = 0;
+
+                    for (int j = (n - 1) % 16; j >= 0; --j) {
+                        locs_num = (locs_num << 2) | locs[j];
+                    }
+
+                    *locs_ptr = locs_num;
+                }
+
                 break;
             }
+
+            case IC::CALLC: // ignore arg
+                bytecode_idx += sizeof(uint32_t);
+                break;
 
             // no args
             default:
@@ -854,6 +949,10 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
 #undef NAT_ARG
 #undef STRING_ARG
+#undef CODE_PTR_ARG
+#undef LOC_G_ARG
+#undef LOC_A_ARG
+#undef LOC_L_ARG
         }
 
         if ((bytecode->code_ptr[bytecode_idx - 1] & 0xF0) != 0xF0) {
@@ -862,11 +961,21 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         }
     }
 
+#ifdef DEBUG
+#define NEXT do { \
+    log_file << "Current IP: 0x" << std::hex << ip - converted_base << std::dec << std::endl; \
+    goto *(*ip++).interpreter; \
+} while (false)
+#else
 #define NEXT do { goto *(*ip++).interpreter; } while (false)
+#endif
 
     activation * current_activation = nullptr;
     const CC * ip = converted_base + 2;
-    const CC * rip = converted_base; // TODO set in CALL and CALLC
+    const CC * rip = converted_base;
+
+    // ATTENTION: do not call GC between CALLC and CBEGIN
+    heap_object * cp = nullptr;
 
     std::vector<value> stack;
     stack.emplace_back(); // argc
@@ -1093,6 +1202,9 @@ I_STA: {
         case heap_object::SEXP:
             obj->field(index) = x;
             break;
+
+        case heap_object::CLOSURE:
+            throw std::invalid_argument { "cannot assign value in closure" };
         }
     } else {
         if (heap.is_heap_value(index_value)) {
@@ -1163,6 +1275,9 @@ I_ELEM: {
     case heap_object::SEXP:
         result = obj->field(index);
         break;
+
+    case heap_object::CLOSURE:
+        throw std::invalid_argument { "cannot index closure" };
     }
 
     stack.emplace_back(result);
@@ -1241,8 +1356,9 @@ I_CJMPnz: {
 I_BEGIN: {
     const int32_t imm1 = (ip++)->num; // args
     const int32_t imm2 = (ip++)->num; // locals
-    auto * const act = activation::create(current_activation, rip, imm1 + imm2);
+    auto * const act = activation::create(current_activation, rip, imm1 + imm2, value { cp });
     rip = nullptr;
+    cp = nullptr;
 
     for (std::size_t i = imm1; i > 0; --i) {
         act->local(i - 1) = stack.back();
@@ -1256,11 +1372,58 @@ I_BEGIN: {
 I_CBEGIN:
     goto I_unsupported;
 
-I_CLOSURE:
-    goto I_unsupported;
+I_CLOSURE: {
+    auto * const imm1 = (ip++)->code;
+    const std::size_t imm2 = (ip++)->index;
 
-I_CALLC:
-    goto I_unsupported;
+    auto * const result = heap.alloc(heap_object::CLOSURE, imm2);
+    result->field(imm2).code = imm1;
+
+    uint32_t locs;
+    for (std::size_t i = 0; i < imm2; ++i) {
+        if (i % 16 == 0) {
+            locs = (ip++)->locs;
+        }
+
+        const uint8_t loc = locs & 3;
+        locs >>= 2;
+
+        switch (loc) {
+        case 0: // G(x)
+            result->field(i) = *(ip++)->global;
+            break;
+
+        case 1: // L(x)
+        case 2: // A(x)
+            result->field(i) = current_activation->local((ip++)->index);
+            break;
+
+        case 3: // TODO C(x)
+            break;
+        }
+    }
+
+    stack.emplace_back(result);
+    NEXT;
+}
+
+I_CALLC: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    heap.assert_heap_value(x);
+
+    heap_object * const obj = x.object;
+    cp = obj;
+
+    if (obj->get_kind() != heap_object::CLOSURE) {
+        throw std::invalid_argument { "cannot call value as closure" };
+    }
+
+    rip = ip;
+    ip = obj->field(obj->fields_size).code;
+    NEXT;
+}
 
 I_CALL: {
     auto * const imm = (ip++)->code;
@@ -1400,6 +1563,7 @@ int main(int argc, char * argv[]) {
 
     auto bytecode = read_bytecode(argv[1]);
 
+#ifdef DEBUG
     log_file << "String pool size: " << bytecode->string_size << std::endl;
     log_file << "Global area size: " << bytecode->global_size << std::endl;
     log_file << "Code size: " << bytecode->code_size << std::endl;
@@ -1412,6 +1576,7 @@ int main(int argc, char * argv[]) {
                  << " -> 0x" << std::hex << public_entry.code_pos << std::dec
                  << std::endl;
     }
+#endif
 
     interpret(bytecode);
 }
