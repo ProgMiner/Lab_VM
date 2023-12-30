@@ -142,6 +142,7 @@ struct heap_object {
 
     uint8_t kind;
     std::size_t fields_size;
+    heap_object * actual_ptr;
 
     object_kind get_kind() const {
         switch (kind) {
@@ -308,6 +309,7 @@ struct heap {
 
         result->kind = kind;
         result->fields_size = fields;
+        result->actual_ptr = result;
         return result;
     }
 
@@ -344,28 +346,27 @@ struct heap {
 
     void gc() {
         std::size_t new_offset = 0;
-        std::unordered_map<const heap_object *, heap_object *> moved_objects;
 
 #ifdef DEBUG
         log_file << "Run GC" << std::endl;
 #endif
 
         for (std::size_t i = 0; i < global_area_size; ++i) {
-            move_value(global_area[i], new_offset, moved_objects);
+            move_value(global_area[i], new_offset);
         }
 
         for (value & v : stack) {
-            move_value(v, new_offset, moved_objects);
+            move_value(v, new_offset);
         }
 
         {
             activation * act = current_activation;
 
             while (act) {
-                move_value(act->closure, new_offset, moved_objects);
+                move_value(act->closure, new_offset);
 
                 for (std::size_t i = 0; i < act->locals_size; ++i) {
-                    move_value(act->local(i), new_offset, moved_objects);
+                    move_value(act->local(i), new_offset);
                 }
 
                 act = act->parent;
@@ -376,18 +377,14 @@ struct heap {
         offset = new_offset;
     }
 
-    void move_value(
-        value & val,
-        std::size_t & new_offset,
-        std::unordered_map<const heap_object *, heap_object *> & moved_objects
-    ) {
+    void move_value(value & val, std::size_t & new_offset) {
         if (!is_heap_value(val)) {
             return;
         }
 
         heap_object * const heap_ptr = val.object;
-        if (auto it = moved_objects.find(heap_ptr); it != moved_objects.end()) {
-            val.object = it->second;
+        if (heap_ptr->actual_ptr != heap_ptr) {
+            val.object = heap_ptr->actual_ptr;
             return;
         }
 
@@ -398,6 +395,7 @@ struct heap {
         heap_object * const new_ptr = reinterpret_cast<heap_object *>(second_half + new_offset);
         new_offset += object_size;
 
+        heap_ptr->actual_ptr = new_ptr;
         std::memcpy(new_ptr, heap_ptr, object_size);
 
 #ifdef DEBUG
@@ -407,7 +405,6 @@ struct heap {
                  << std::endl;
 #endif
 
-        moved_objects[heap_ptr] = new_ptr;
         val.object = new_ptr;
 
         if (k == heap_object::STRING) {
@@ -415,7 +412,7 @@ struct heap {
         }
 
         for (std::size_t i = 0; i < new_ptr->fields_size; ++i) {
-            move_value(new_ptr->field(i), new_offset, moved_objects);
+            move_value(new_ptr->field(i), new_offset);
         }
     }
 
