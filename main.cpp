@@ -236,6 +236,9 @@ struct activation {
 
 static bool is_fixnum(uint32_t x) noexcept;
 
+template<typename T>
+static inline constexpr T p2(T x) noexcept;
+
 struct heap {
 
     value * global_area;
@@ -336,16 +339,14 @@ struct heap {
     }
 
     void request(std::size_t object_size) {
-        if (offset + object_size <= size / 2) {
+        const std::size_t min_size = (offset + object_size) * 2;
+
+        if (min_size <= size) {
             return;
         }
 
         gc();
-
-        // TODO grow to requested size once
-        while (offset + object_size > size / 2) {
-            grow();
-        }
+        grow(min_size);
     }
 
     void gc() {
@@ -460,8 +461,10 @@ struct heap {
         }
     }
 
-    void grow() {
-        uint8_t * new_buffer = new uint8_t[size * 2];
+    void grow(std::size_t new_size) {
+        new_size = p2(new_size);
+
+        uint8_t * new_buffer = new uint8_t[new_size];
 
         if (!new_buffer) {
             throw std::bad_alloc {};
@@ -470,8 +473,8 @@ struct heap {
         second_half = new_buffer;
         gc();
 
-        second_half = new_buffer + size;
-        size *= 2;
+        second_half = new_buffer + new_size / 2;
+        size = new_size;
 
         buffer.reset(new_buffer);
 
@@ -484,6 +487,17 @@ struct heap {
     }
 };
 
+
+template<typename T>
+static inline constexpr T p2(T x) noexcept {
+    T res = 1;
+
+    while (res < x) {
+        res <<= 1;
+    }
+
+    return res;
+}
 
 value & heap_object::field(std::size_t idx) noexcept {
     return *(reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this)
