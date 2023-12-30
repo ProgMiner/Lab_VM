@@ -4,6 +4,7 @@
 #include <sstream>
 #include <cstdint>
 #include <cstring>
+#include <cassert>
 #include <memory>
 #include <vector>
 #include <list>
@@ -143,6 +144,9 @@ struct heap_object {
     uint8_t kind;
     std::size_t fields_size;
     heap_object * actual_ptr;
+    heap_object * gc_next;
+
+    heap_object() = delete;
 
     object_kind get_kind() const {
         switch (kind) {
@@ -209,10 +213,8 @@ struct activation {
     value closure;
 
     value & local(std::size_t idx) noexcept {
-        return *(
-            reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this) + sizeof(activation))
-                + idx
-        );
+        return *(reinterpret_cast<value *>(reinterpret_cast<uint8_t *>(this) + sizeof(activation))
+            + idx);
     }
 
     static activation * create(activation * parent, const CC * return_ptr, std::size_t locals) {
@@ -310,6 +312,7 @@ struct heap {
         result->kind = kind;
         result->fields_size = fields;
         result->actual_ptr = result;
+        result->gc_next = nullptr;
         return result;
     }
 
@@ -345,6 +348,8 @@ struct heap {
     }
 
     void gc() {
+        heap_object * queue_head = nullptr;
+        heap_object ** queue_tail = &queue_head;
         std::size_t new_offset = 0;
 
 #ifdef DEBUG
@@ -352,41 +357,63 @@ struct heap {
 #endif
 
         for (std::size_t i = 0; i < global_area_size; ++i) {
-            move_value(global_area[i], new_offset);
+            mark_value(global_area[i], new_offset, queue_tail);
         }
 
         for (value & v : stack) {
-            move_value(v, new_offset);
+            mark_value(v, new_offset, queue_tail);
         }
 
         {
             activation * act = current_activation;
 
             while (act) {
-                move_value(act->closure, new_offset);
+                mark_value(act->closure, new_offset, queue_tail);
 
                 for (std::size_t i = 0; i < act->locals_size; ++i) {
-                    move_value(act->local(i), new_offset);
+                    mark_value(act->local(i), new_offset, queue_tail);
                 }
 
                 act = act->parent;
             }
         }
 
+        while (queue_head) {
+            heap_object * new_queue_head = nullptr;
+            heap_object ** new_queue_tail = &new_queue_head;
+
+            for (; queue_head; queue_head = queue_head->gc_next) {
+                compact_object(queue_head, new_offset, new_queue_tail);
+            }
+
+            queue_head = new_queue_head;
+            // queue_tail = new_queue_tail;
+        }
+
         std::swap(first_half, second_half);
         offset = new_offset;
     }
 
-    void move_value(value & val, std::size_t & new_offset) {
+    void mark_value(value & val, size_t & new_offset, heap_object ** & queue_tail) {
         if (!is_heap_value(val)) {
             return;
         }
 
-        heap_object * const heap_ptr = val.object;
+        val.object = mark_object(val.object, new_offset, queue_tail);
+    }
+
+    heap_object * mark_object(
+        heap_object * heap_ptr,
+        size_t & new_offset,
+        heap_object ** & queue_tail
+    ) {
         if (heap_ptr->actual_ptr != heap_ptr) {
-            val.object = heap_ptr->actual_ptr;
-            return;
+            return heap_ptr->actual_ptr;
         }
+
+#ifdef DEBUG
+        assert(!heap_ptr->gc_next);
+#endif
 
         const heap_object::object_kind k = heap_ptr->get_kind();
         const std::size_t object_size = align_size(sizeof(heap_object))
@@ -396,7 +423,25 @@ struct heap {
         new_offset += object_size;
 
         heap_ptr->actual_ptr = new_ptr;
+
+        *queue_tail = heap_ptr;
+        queue_tail = &heap_ptr->gc_next;
+        return new_ptr;
+    }
+
+    void compact_object(heap_object * heap_ptr, size_t & new_offset, heap_object ** & queue_tail) {
+        heap_object * const new_ptr = heap_ptr->actual_ptr;
+
+#ifdef DEBUG
+        assert(new_ptr != heap_ptr);
+#endif
+
+        const heap_object::object_kind k = heap_ptr->get_kind();
+        const std::size_t object_size = align_size(sizeof(heap_object))
+            + align_size(get_object_size(k, heap_ptr->fields_size));
+
         std::memcpy(new_ptr, heap_ptr, object_size);
+        new_ptr->gc_next = nullptr;
 
 #ifdef DEBUG
         log_file << "Moved object of size " << object_size
@@ -405,14 +450,12 @@ struct heap {
                  << std::endl;
 #endif
 
-        val.object = new_ptr;
-
         if (k == heap_object::STRING) {
             return;
         }
 
         for (std::size_t i = 0; i < new_ptr->fields_size; ++i) {
-            move_value(new_ptr->field(i), new_offset);
+            mark_value(new_ptr->field(i), new_offset, queue_tail);
         }
     }
 
@@ -616,7 +659,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         interpreter_ptrs[IC::LDA_G] = &&I_LDA_G;
         interpreter_ptrs[IC::LDA_L] = &&I_LDA_AL;
         interpreter_ptrs[IC::LDA_A] = &&I_LDA_AL;
-        interpreter_ptrs[IC::LDA_C] = &&I_LDA_C;
         interpreter_ptrs[IC::ST_G] = &&I_ST_G;
         interpreter_ptrs[IC::ST_L] = &&I_ST_AL;
         interpreter_ptrs[IC::ST_A] = &&I_ST_AL;
@@ -850,7 +892,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             // C(int) arg
             case IC::LD_C:
-            case IC::LDA_C:
             case IC::ST_C:
                 LOC_C_ARG(converted[converted_idx++].index);
                 break;
@@ -879,6 +920,17 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 NAT_ARG(converted[converted_idx++].num);
                 break;
             }
+
+            case IC::LDA_C:
+                // technically it is simple operation, but may cause pointers to middle of object
+                // on stack, that could break the GC invariant (all pointers in heap points to
+                // start of objects)
+                //
+                // Dmitry Boulytchev says that assignment to closured values is forbidden, but
+                // is compiled by actual LaMa compiler because of historical reasons, so we assume
+                // that programs that uses assignments to closured values is ill-formed, and
+                // interpreter may not support that
+                throw std::invalid_argument { "LDA C(_) is not supported" };
 
             case IC::CLOSURE: {
                 CODE_PTR_ARG(converted[converted_idx++].code, false);
@@ -976,10 +1028,10 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 #ifdef DEBUG
 #define NEXT do { \
     log_file << "Current IP: 0x" << std::hex << ip - converted_base << std::dec << std::endl; \
-    goto *(*ip++).interpreter; \
+    goto *(ip++)->interpreter; \
 } while (false)
 #else
-#define NEXT do { goto *(*ip++).interpreter; } while (false)
+#define NEXT do { goto *(ip++)->interpreter; } while (false)
 #endif
 
     activation * current_activation = nullptr;
@@ -1325,9 +1377,6 @@ I_LDA_AL: {
     stack.emplace_back(&current_activation->local(imm));
     NEXT;
 }
-
-I_LDA_C:
-    goto I_unsupported;
 
 I_ST_G: {
     auto * const imm = (ip++)->global;
