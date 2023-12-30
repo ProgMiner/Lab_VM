@@ -199,10 +199,10 @@ static_assert(sizeof(CC) == sizeof(void *));
 
 struct instruction_meta {
 
-    const CC * converted = nullptr;
+    CC * converted = nullptr;
     std::size_t function_idx = UINT32_MAX;
     std::size_t stack_depth = UINT32_MAX;
-    std::list<CC *> forward_ptrs;
+    std::list<std::size_t> forward_idxs;
 };
 
 struct activation {
@@ -645,7 +645,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         new value[bytecode->global_size],
     };
 
-    const CC * const converted_base = converted.get();
+    CC * const converted_base = converted.get();
     value * const global_area_base = global_area.get();
 
     {
@@ -741,10 +741,18 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             ins_meta.converted = converted_base + converted_idx;
             ins_meta.function_idx = current_function_idx;
 
-            for (CC * forward : ins_meta.forward_ptrs) {
-                forward->code = ins_meta.converted;
+            for (std::size_t forward_idx : ins_meta.forward_idxs) {
+                const instruction_meta & forward_meta = instructions_meta[forward_idx];
 
-                // TODO check labels accessed from same function
+                const std::size_t forward_function_idx = forward_meta.function_idx;
+                if (
+                    forward_function_idx != UINT32_MAX
+                    && forward_function_idx != current_function_idx
+                ) {
+                    throw std::invalid_argument { "attempt to jump to another function" };
+                }
+
+                forward_meta.converted->code = ins_meta.converted;
             }
 
             if ((0xF0 & code) == 0xF0) {
@@ -807,7 +815,9 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     __var = bytecode->string_ptr + _idx; \
 } while (false)
 
-#define CODE_PTR_ARG(__var, __jump) do { \
+#define CODE_PTR_ARG(__jump) do { \
+    const std::size_t _old_bytecode_idx = bytecode_idx; \
+\
     const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
     if (_idx >= bytecode->code_size) { \
         throw std::invalid_argument { "pointer to bytecode out of range" }; \
@@ -820,10 +830,14 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             throw std::invalid_argument { "attempt to jump to another function" }; \
         } \
 \
-        __var = _idx_ins_meta.converted; \
+        converted[converted_idx++].code = _idx_ins_meta.converted; \
     } else { \
-        _idx_ins_meta.forward_ptrs.emplace_back(&converted[converted_idx]); \
-        __var = converted_base + 1; \
+        instructions_meta[_old_bytecode_idx].converted = converted_base + converted_idx; \
+        instructions_meta[_old_bytecode_idx].function_idx = (__jump) \
+            ? current_function_idx : UINT32_MAX; \
+\
+        _idx_ins_meta.forward_idxs.emplace_back(_old_bytecode_idx); \
+        converted[converted_idx++].code = converted_base + 1; \
     } \
 } while (false)
 
@@ -894,7 +908,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case IC::JMP:
             case IC::CJMPz:
             case IC::CJMPnz:
-                CODE_PTR_ARG(converted[converted_idx++].code, true);
+                CODE_PTR_ARG(true);
                 break;
 
             // G(int) arg
@@ -961,7 +975,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 throw std::invalid_argument { "LDA C(_) is not supported" };
 
             case IC::CLOSURE: {
-                CODE_PTR_ARG(converted[converted_idx++].code, false);
+                CODE_PTR_ARG(false);
 
                 const uint32_t n = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
                 if (bytecode_idx + n * 5 > bytecode->code_size) {
@@ -1027,7 +1041,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             case IC::CALL:
-                CODE_PTR_ARG(converted[converted_idx++].code, false);
+                CODE_PTR_ARG(false);
 
                 // ignore second arg
                 bytecode_idx += 4;
