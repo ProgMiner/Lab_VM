@@ -571,7 +571,15 @@ static void value_to_string(const struct heap & heap, value v, std::ostringstrea
         break;
 
     case heap_object::CLOSURE:
-        // TODO
+        result << "<closure " << obj->field(fields).code;
+
+        for (std::size_t i = 0; i < fields; ++i) {
+            result << ", ";
+
+            value_to_string(heap, obj->field(i), result);
+        }
+
+        result << '>';
         break;
     }
 }
@@ -629,11 +637,8 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
 }
 
 static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
-    // TODO reserved instructions in converted size
-    // TODO add finish at the end (check stack size > 0)
-
     std::unique_ptr<CC[], std::default_delete<CC[]>> converted {
-        new CC[bytecode->code_size],
+        new CC[bytecode->code_size + 3],
     };
 
     std::unique_ptr<value[], std::default_delete<value[]>> global_area {
@@ -782,6 +787,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check stack depth at END is 1
             // TODO check index of C(_) loc
             // TODO check CBEGIN is only in CLOSURE
+            // TODO check stack size > 0 at finish (first and last)
 
 #define NAT_ARG(__var) do { \
     const int32_t _imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
@@ -1045,6 +1051,8 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             throw std::invalid_argument { "no <end> at end of bytecode" };
             return;
         }
+
+        converted[converted_idx].interpreter = &&finish;
     }
 
 #ifdef DEBUG
@@ -1717,6 +1725,10 @@ I_CALL_Lstring: {
         value_to_string(heap, x, os);
 
         const std::string str = std::move(os).str();
+
+#ifdef DEBUG
+        log_file << "Lstring: " << str << std::endl;
+#endif
 
         auto * const result = heap.alloc(heap_object::STRING, str.size());
 
