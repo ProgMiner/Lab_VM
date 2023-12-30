@@ -342,6 +342,7 @@ struct heap {
 
         gc();
 
+        // TODO grow to requested size once
         while (offset + object_size > size / 2) {
             grow();
         }
@@ -614,6 +615,9 @@ static std::shared_ptr<bytecode_contents> read_bytecode(const char * filename) {
 }
 
 static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
+    // TODO reserved instructions in converted size
+    // TODO add finish at the end (check stack size > 0)
+
     std::unique_ptr<CC[], std::default_delete<CC[]>> converted {
         new CC[bytecode->code_size],
     };
@@ -734,6 +738,10 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             if (code == IC::BEGIN || code == IC::CBEGIN) {
+                if (current_function_idx != UINT32_MAX) {
+                    throw std::invalid_argument { "illegal nested function" };
+                }
+
                 current_function_idx = converted_idx;
                 current_function_args = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx);
                 current_function_locals = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx + 4);
