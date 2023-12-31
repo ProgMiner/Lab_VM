@@ -249,6 +249,7 @@ struct symbolic_stack {
 struct instruction_meta {
 
     CC * converted = nullptr;
+    std::size_t closure_size = UINT32_MAX;
     std::size_t function_idx = UINT32_MAX;
     std::size_t stack_depth = UINT32_MAX;
     std::shared_ptr<const symbolic_stack> stack;
@@ -785,6 +786,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         std::size_t current_function_args = 0;
         std::size_t current_function_locals = 0;
         bool current_function_closure = false;
+        std::size_t current_closure_size = UINT32_MAX;
 
         // we absolutely need symbolic stack here because of STA instruction that consumes
         // different number of value depending on other consumed values
@@ -864,13 +866,27 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 current_function_args = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx);
                 current_function_locals = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx + 4);
                 current_function_closure = code == IC::CBEGIN;
+                current_closure_size = ins_meta.closure_size;
                 ins_meta.function_idx = current_function_idx;
                 stack = std::make_shared<symbolic_stack>();
+
+#ifdef DEBUG
+                // the only case I've seen of CBEGIN without forward references
+                // is an unused closure, so I will not forbid this but will not add
+                // runtime index checks too =)
+                if (current_function_closure && current_closure_size == UINT32_MAX) {
+                    log_file << "CBEGIN without forward references at 0x"
+                             << std::hex << converted_idx << std::dec
+                             << " - static C(_) index checks disabled"
+                             << std::endl;
+                }
+#endif
             } else if (code == IC::END) {
                 current_function_idx = UINT32_MAX;
                 current_function_args = 0;
                 current_function_locals = 0;
                 current_function_closure = false;
+                current_closure_size = UINT32_MAX;
             }
 
             const void * interpreter_ptr = interpreter_ptrs[code];
@@ -884,8 +900,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             converted[converted_idx++].interpreter = interpreter_ptr;
-
-            // TODO check index of C(_) loc
 
 #define NAT_ARG(__var) do { \
     const int32_t _imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
@@ -1006,7 +1020,14 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         throw std::invalid_argument { "cannot use closured values outside of closure" }; \
     } \
 \
-    __var = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+    const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
+\
+    /* current_closure_size may be UINT32_MAX if there aren't forward references to CBEGIN */ \
+    if (_idx >= current_closure_size) { \
+        throw std::invalid_argument { "closured value index is greater that closure size" }; \
+    } \
+\
+    __var = _idx; \
 } while (false)
 
 #define PUSH_STACK(__val) do { \
@@ -1256,6 +1277,13 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
                 converted[converted_idx++].index = n;
 
+                auto & idx_ins_meta = instructions_meta[idx];
+                if (idx_ins_meta.closure_size == UINT32_MAX) {
+                    idx_ins_meta.closure_size = n;
+                } else if (idx_ins_meta.closure_size != n) {
+                    throw std::invalid_argument { "different sizes of closures for same function" };
+                }
+
                 uint8_t locs[16] {};
                 std::uint32_t * locs_ptr = nullptr;
                 for (std::size_t i = 0; i < n; ++i) {
@@ -1439,14 +1467,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         converted[converted_idx].interpreter = &&finish;
     }
 
-#ifdef DEBUG
-#define NEXT do { \
-    log_file << "Current IP: 0x" << std::hex << ip - converted_base << std::dec << std::endl; \
-    goto *(ip++)->interpreter; \
-} while (false)
-#else
 #define NEXT do { goto *(ip++)->interpreter; } while (false)
-#endif
 
     activation * current_activation = nullptr;
     const CC * ip = converted_base + 2;
@@ -1689,6 +1710,9 @@ I_STA: {
         case heap_object::CLOSURE:
             throw std::out_of_range { "cannot assign value in closure" };
         }
+    } else if (heap.is_heap_value(index_value)) {
+        // this check is correct while LDA C(_) is forbidden
+        throw std::out_of_range { "assignment in heap object" };
     } else {
         *index_value.var = x;
     }
