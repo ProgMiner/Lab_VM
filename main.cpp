@@ -888,8 +888,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check CBEGIN is only in CLOSURE
             // TODO check index of C(_) loc
 
-            // TODO check stack size > 0 at finish (first and last)
-
 #define NAT_ARG(__var) do { \
     const int32_t _imm = read_from_bytes<int32_t>(bytecode->code_ptr, bytecode_idx); \
     if (_imm < 0) { \
@@ -1076,7 +1074,10 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             case IC::STI:
-                throw std::invalid_argument { "STI" }; // TODO
+                POP_STACK(false);
+                POP_STACK(true);
+                PUSH_STACK(false);
+                break;
 
             case IC::STA: {
                 POP_STACK(false);
@@ -1602,8 +1603,18 @@ I_SEXP: {
     NEXT;
 }
 
-I_STI:
-    goto I_unsupported; // TODO implement deprecated instruction
+I_STI: {
+    const value x = stack.back();
+    stack.pop_back();
+
+    const value y = stack.back();
+    stack.pop_back();
+
+    *y.var = x;
+
+    stack.emplace_back(x);
+    NEXT;
+}
 
 I_STA: {
     const value x = stack.back();
@@ -1640,10 +1651,6 @@ I_STA: {
             throw std::out_of_range { "cannot assign value in closure" };
         }
     } else {
-        if (heap.is_heap_value(index_value)) {
-            throw std::out_of_range { "invalid assignment target" };
-        }
-
         *index_value.var = x;
     }
 
@@ -2092,12 +2099,6 @@ I_CALL_Barray: {
     stack.emplace_back(result);
     NEXT;
 }
-
-I_unsupported: // unsupported instruction
-    std::ostringstream os;
-
-    os << "Unsupported instruction at 0x" << std::hex << ip - converted_base - 1;
-    throw std::invalid_argument { os.str() };
 
 bad_jump: // unresolved jump
     throw std::invalid_argument { "unresolved jump happen" };
