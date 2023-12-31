@@ -197,11 +197,61 @@ union CC {
 static_assert(sizeof(value) == sizeof(void *));
 static_assert(sizeof(CC) == sizeof(void *));
 
+// symbolic stack
+//
+// persistent stack optimized to store one-bit values
+//
+// - false - value
+// - true - loc
+struct symbolic_stack {
+
+    std::shared_ptr<const symbolic_stack> next;
+    uint32_t values = 0;
+    uint8_t size = 0;
+
+    bool empty() const noexcept {
+        return !next && size == 0;
+    }
+
+    bool top() const noexcept {
+        if (size == 0) {
+            return next->top();
+        }
+
+        return values & 1;
+    }
+
+    std::shared_ptr<const symbolic_stack> push(bool value) const {
+        auto result = std::make_shared<symbolic_stack>(*this);
+        result->values = (result->values << 1) | value;
+        ++result->size;
+
+        if (result->size < 32) {
+            return result;
+        }
+
+        auto new_result = std::make_shared<symbolic_stack>();
+        new_result->next = result;
+        return new_result;
+    }
+
+    std::shared_ptr<const symbolic_stack> pop() const {
+        if (size == 0) {
+            return next->pop();
+        }
+
+        auto result = std::make_shared<symbolic_stack>(*this);
+        result->values >>= 1;
+        return result;
+    }
+};
+
 struct instruction_meta {
 
     CC * converted = nullptr;
     std::size_t function_idx = UINT32_MAX;
     std::size_t stack_depth = UINT32_MAX;
+    std::shared_ptr<const symbolic_stack> stack;
     std::list<std::size_t> forward_idxs;
 };
 
@@ -670,7 +720,8 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         interpreter_ptrs[IC::STA] = &&I_STA;
         interpreter_ptrs[IC::JMP] = &&I_JMP;
         interpreter_ptrs[IC::END] = &&I_END;
-        interpreter_ptrs[IC::RET] = &&I_END;
+        // we cannot support RET because of stack size computation logic
+        // interpreter_ptrs[IC::RET] = &&I_END;
         interpreter_ptrs[IC::DROP] = &&I_DROP;
         interpreter_ptrs[IC::DUP] = &&I_DUP;
         interpreter_ptrs[IC::SWAP] = &&I_SWAP;
@@ -682,6 +733,16 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         interpreter_ptrs[IC::LDA_G] = &&I_LDA_G;
         interpreter_ptrs[IC::LDA_L] = &&I_LDA_AL;
         interpreter_ptrs[IC::LDA_A] = &&I_LDA_AL;
+        // technically it is simple operation, but may cause pointers to middle of object
+        // on stack, that could break the GC invariant (all pointers in heap points to
+        // start of objects)
+        //
+        // Dmitry Boulytchev says that assignment to closured values is forbidden, but
+        // is compiled by actual LaMa compiler because of historical reasons, so we assume
+        // that programs that uses assignments to closured values is ill-formed, and
+        // interpreter may not support that
+        //
+        // interpreter_ptrs[IC::LDA_C] = &&I_LDA_C;
         interpreter_ptrs[IC::ST_G] = &&I_ST_G;
         interpreter_ptrs[IC::ST_L] = &&I_ST_AL;
         interpreter_ptrs[IC::ST_A] = &&I_ST_AL;
@@ -725,6 +786,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
         std::size_t current_function_locals = 0;
         bool current_function_closure = false;
 
+        // we absolutely need symbolic stack here because of STA instruction that consumes
+        // different number of value depending on other consumed values
+        auto stack = std::make_shared<const symbolic_stack>();
+        std::size_t stack_depth = 0;
+        bool barrier = false;
+
         std::size_t bytecode_idx = 0;
         std::size_t converted_idx = 2;
         while (bytecode_idx < bytecode->code_size) {
@@ -734,12 +801,34 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             log_file << "0x" << std::hex << bytecode_idx - 1
                      << " (0x" << converted_idx
                      << "). 0x" << code << std::dec
+                     << "\tstack depth: " << stack_depth
                      << std::endl;
 #endif
 
             instruction_meta & ins_meta = instructions_meta[bytecode_idx - 1];
             ins_meta.converted = converted_base + converted_idx;
             ins_meta.function_idx = current_function_idx;
+
+            if (barrier) {
+                if (ins_meta.stack_depth == UINT32_MAX) {
+                    ins_meta.stack_depth = stack_depth;
+                    ins_meta.stack = stack;
+                } else {
+                    stack_depth = ins_meta.stack_depth;
+                    stack = ins_meta.stack;
+                }
+
+                barrier = false;
+            } else {
+                if (ins_meta.stack_depth == UINT32_MAX) {
+                    ins_meta.stack_depth = stack_depth;
+                    ins_meta.stack = stack;
+                } else if (ins_meta.stack_depth != stack_depth) {
+                    if (code != IC::BEGIN && code != IC::CBEGIN) {
+                        throw std::invalid_argument { "different stack depth on different enters" };
+                    }
+                }
+            }
 
             for (std::size_t forward_idx : ins_meta.forward_idxs) {
                 const instruction_meta & forward_meta = instructions_meta[forward_idx];
@@ -774,6 +863,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 current_function_locals = read_from_bytes<uint32_t>(bytecode->code_ptr + bytecode_idx + 4);
                 current_function_closure = code == IC::CBEGIN;
                 ins_meta.function_idx = current_function_idx;
+                stack = std::make_shared<symbolic_stack>();
             } else if (code == IC::END) {
                 current_function_idx = UINT32_MAX;
                 current_function_args = 0;
@@ -783,7 +873,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             const void * interpreter_ptr = interpreter_ptrs[code];
             if (!interpreter_ptr) {
-                interpreter_ptr = &&I_unsupported;
+                // we MUST throw exception here to correctly compute stack size below
+
+                std::ostringstream os;
+
+                os << "unsupported instruction at 0x" << std::hex << bytecode_idx - 1;
+                throw std::invalid_argument { os.str() };
             }
 
             converted[converted_idx++].interpreter = interpreter_ptr;
@@ -793,9 +888,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             // TODO check CBEGIN is only in CLOSURE
             // TODO check index of C(_) loc
 
-            // TODO check same stack depth on labels
-            // TODO check negative stack depth
-            // TODO check stack depth at END is 1
             // TODO check stack size > 0 at finish (first and last)
 
 #define NAT_ARG(__var) do { \
@@ -816,6 +908,19 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     __var = bytecode->string_ptr + _idx; \
 } while (false)
 
+#define TAG_ARG(__var) do { \
+    const char * _tag; \
+    STRING_ARG(_tag); \
+\
+    if (auto _it = tags.find(_tag); _it != tags.end()) { \
+        _tag = _it->second; \
+    } else { \
+        tags[_tag] = _tag; \
+    } \
+\
+    __var = _tag; \
+} while (false)
+
 #define CODE_PTR_ARG(__jump) do { \
     const std::size_t _old_bytecode_idx = bytecode_idx; \
 \
@@ -827,8 +932,15 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     auto & _idx_ins_meta = instructions_meta[_idx]; \
 \
     if (_idx_ins_meta.converted) { \
-        if ((__jump) && _idx_ins_meta.function_idx != current_function_idx) { \
-            throw std::invalid_argument { "attempt to jump to another function" }; \
+        if constexpr (__jump) { \
+            if (_idx_ins_meta.function_idx != current_function_idx) { \
+                throw std::invalid_argument { "attempt to jump to another function" }; \
+            } \
+\
+            if (_idx_ins_meta.stack_depth != stack_depth) { \
+                std::cout << _idx_ins_meta.stack_depth << ' ' << stack_depth << std::endl; \
+                throw std::invalid_argument { "different stack depth on different enters" }; \
+            } \
         } \
 \
         converted[converted_idx++].code = _idx_ins_meta.converted; \
@@ -838,6 +950,9 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             ? current_function_idx : UINT32_MAX; \
 \
         _idx_ins_meta.forward_idxs.emplace_back(_old_bytecode_idx); \
+        _idx_ins_meta.stack_depth = stack_depth; \
+        _idx_ins_meta.stack = stack; \
+\
         converted[converted_idx++].code = converted_base + 1; \
     } \
 } while (false)
@@ -885,95 +1000,217 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     __var = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
 } while (false)
 
+#define PUSH_STACK(__val) do { \
+    stack = stack->push(__val); \
+    ++stack_depth; \
+} while (false)
+
+#define POP_STACK(__expected) do { \
+    if (stack->empty()) { \
+        throw std::invalid_argument { "negative stack depth" }; \
+    } \
+\
+    if (stack->top() != (__expected)) { \
+        throw std::invalid_argument { "unexpected stack value sort" }; \
+    } \
+\
+    stack = stack->pop(); \
+    --stack_depth; \
+} while (false)
+
+#define POP_STACK_EXT(__var) do { \
+    if (stack->empty()) { \
+        throw std::invalid_argument { "negative stack depth" }; \
+    } \
+\
+    __var = stack->top(); \
+    stack = stack->pop(); \
+    --stack_depth; \
+} while (false)
+
             switch (code) {
 
-            // fixnum arg
+            case IC::BINOP_add:
+            case IC::BINOP_sub:
+            case IC::BINOP_mul:
+            case IC::BINOP_div:
+            case IC::BINOP_rem:
+            case IC::BINOP_lt:
+            case IC::BINOP_le:
+            case IC::BINOP_gt:
+            case IC::BINOP_ge:
+            case IC::BINOP_eq:
+            case IC::BINOP_ne:
+            case IC::BINOP_and:
+            case IC::BINOP_or:
+                POP_STACK(false);
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
             case IC::CONST:
                 converted[converted_idx++].fixnum =
                     to_fixnum(read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx));
+
+                PUSH_STACK(false);
                 break;
 
-            // nat arg
-            case IC::CALLC:
-            case IC::ARRAY:
-            case IC::CALL_Barray:
-                NAT_ARG(converted[converted_idx++].num);
-                break;
-
-            // string arg
             case IC::STRING:
                 STRING_ARG(converted[converted_idx++].string);
+                PUSH_STACK(false);
                 break;
 
-            // offset in code arg
-            case IC::JMP:
-            case IC::CJMPz:
-            case IC::CJMPnz:
-                CODE_PTR_ARG(true);
-                break;
+            case IC::SEXP: {
+                TAG_ARG(converted[converted_idx++].string);
 
-            // G(int) arg
-            case IC::LD_G:
-            case IC::LDA_G:
-            case IC::ST_G:
-                LOC_G_ARG(converted[converted_idx++].global);
-                break;
+                int32_t n;
+                NAT_ARG(n);
+                converted[converted_idx++].num = n;
 
-            // A(int) arg
-            case IC::LD_A:
-            case IC::LDA_A:
-            case IC::ST_A:
-                LOC_A_ARG(converted[converted_idx++].index);
-                break;
-
-            // L(int) arg
-            case IC::LD_L:
-            case IC::LDA_L:
-            case IC::ST_L:
-                LOC_L_ARG(converted[converted_idx++].index);
-                break;
-
-            // C(int) arg
-            case IC::LD_C:
-            case IC::ST_C:
-                LOC_C_ARG(converted[converted_idx++].index);
-                break;
-
-            // nat, nat args
-            case IC::BEGIN:
-            case IC::CBEGIN:
-            case IC::FAIL:
-                NAT_ARG(converted[converted_idx++].num);
-                NAT_ARG(converted[converted_idx++].num);
-                break;
-
-            // tag, nat args
-            case IC::SEXP:
-            case IC::TAG: {
-                const char * tag;
-                STRING_ARG(tag);
-
-                if (auto it = tags.find(tag); it != tags.end()) {
-                    tag = it->second;
-                } else {
-                    tags[tag] = tag;
+                for (int32_t i = 0; i < n; ++i) {
+                    POP_STACK(false);
                 }
 
-                converted[converted_idx++].string = tag;
-                NAT_ARG(converted[converted_idx++].num);
+                PUSH_STACK(false);
                 break;
             }
 
-            case IC::LDA_C:
-                // technically it is simple operation, but may cause pointers to middle of object
-                // on stack, that could break the GC invariant (all pointers in heap points to
-                // start of objects)
-                //
-                // Dmitry Boulytchev says that assignment to closured values is forbidden, but
-                // is compiled by actual LaMa compiler because of historical reasons, so we assume
-                // that programs that uses assignments to closured values is ill-formed, and
-                // interpreter may not support that
-                throw std::invalid_argument { "LDA C(_) is not supported" };
+            case IC::STI:
+                throw std::invalid_argument { "STI" }; // TODO
+
+            case IC::STA: {
+                POP_STACK(false);
+
+                bool arg;
+                POP_STACK_EXT(arg);
+
+                // if not loc on stack, pop index too
+                if (!arg) {
+                    POP_STACK(false);
+                }
+
+                PUSH_STACK(false);
+                break;
+            }
+
+            case IC::JMP:
+                CODE_PTR_ARG(true);
+                barrier = true;
+                break;
+
+            case IC::END:
+                POP_STACK(false);
+                break;
+
+            case IC::DROP: {
+                bool arg;
+
+                POP_STACK_EXT(arg);
+                (void) arg;
+                break;
+            }
+
+            case IC::DUP: {
+                bool arg;
+
+                POP_STACK_EXT(arg);
+                PUSH_STACK(arg);
+                PUSH_STACK(arg);
+                break;
+            }
+
+            case IC::SWAP: {
+                bool arg1, arg2;
+
+                POP_STACK_EXT(arg1);
+                POP_STACK_EXT(arg2);
+
+                PUSH_STACK(arg1);
+                PUSH_STACK(arg2);
+                break;
+            }
+
+            case IC::ELEM:
+                POP_STACK(false);
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::LD_G:
+                LOC_G_ARG(converted[converted_idx++].global);
+                PUSH_STACK(false);
+                break;
+
+            case IC::LD_L:
+                LOC_L_ARG(converted[converted_idx++].index);
+                PUSH_STACK(false);
+                break;
+
+            case IC::LD_A:
+                LOC_A_ARG(converted[converted_idx++].index);
+                PUSH_STACK(false);
+                break;
+
+            case IC::LD_C:
+                LOC_C_ARG(converted[converted_idx++].index);
+                PUSH_STACK(false);
+                break;
+
+            case IC::LDA_G:
+                LOC_G_ARG(converted[converted_idx++].global);
+                PUSH_STACK(true);
+                break;
+
+            case IC::LDA_L:
+                LOC_L_ARG(converted[converted_idx++].index);
+                PUSH_STACK(true);
+                break;
+
+            case IC::LDA_A:
+                LOC_A_ARG(converted[converted_idx++].index);
+                PUSH_STACK(true);
+                break;
+
+            case IC::ST_G:
+                LOC_G_ARG(converted[converted_idx++].global);
+
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::ST_L:
+                LOC_L_ARG(converted[converted_idx++].index);
+
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::ST_A:
+                LOC_A_ARG(converted[converted_idx++].index);
+
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::ST_C:
+                LOC_C_ARG(converted[converted_idx++].index);
+
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::CJMPz:
+            case IC::CJMPnz:
+                // order is important
+                POP_STACK(false);
+                CODE_PTR_ARG(true);
+                break;
+
+            case IC::BEGIN:
+            case IC::CBEGIN:
+                NAT_ARG(converted[converted_idx++].num);
+                NAT_ARG(converted[converted_idx++].num);
+                break;
 
             case IC::CLOSURE: {
                 CODE_PTR_ARG(false);
@@ -1038,28 +1275,120 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                     *locs_ptr = locs_num;
                 }
 
+                PUSH_STACK(false);
                 break;
             }
 
-            case IC::CALL:
+            case IC::CALLC: {
+                int32_t args;
+
+                NAT_ARG(args);
+                converted[converted_idx++].num = args;
+
+                for (int32_t i = 0; i < args; ++i) {
+                    POP_STACK(false);
+                }
+
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+            }
+
+            case IC::CALL: {
                 CODE_PTR_ARG(false);
 
-                // ignore second arg
-                bytecode_idx += 4;
+                int32_t args;
+                NAT_ARG(args);
+
+                for (int32_t i = 0; i < args; ++i) {
+                    POP_STACK(false);
+                }
+
+                PUSH_STACK(false);
+                break;
+            }
+
+            case IC::TAG:
+                TAG_ARG(converted[converted_idx++].string);
+                NAT_ARG(converted[converted_idx++].num);
+
+                POP_STACK(false);
+                PUSH_STACK(false);
                 break;
 
-            // no args
-            default:
+            case IC::ARRAY:
+                NAT_ARG(converted[converted_idx++].num);
+
+                POP_STACK(false);
+                PUSH_STACK(false);
                 break;
+
+            case IC::FAIL:
+                NAT_ARG(converted[converted_idx++].num);
+                NAT_ARG(converted[converted_idx++].num);
+                POP_STACK(false);
+                break;
+
+            case IC::PATT_str:
+                POP_STACK(false);
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::PATT_string:
+            case IC::PATT_array:
+            case IC::PATT_sexp:
+            case IC::PATT_ref:
+            case IC::PATT_val:
+            case IC::PATT_fun:
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::CALL_Lread:
+                PUSH_STACK(false);
+                break;
+
+            case IC::CALL_Lwrite:
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::CALL_Llength:
+            case IC::CALL_Lstring:
+                POP_STACK(false);
+                PUSH_STACK(false);
+                break;
+
+            case IC::CALL_Barray: {
+                int32_t n;
+
+                NAT_ARG(n);
+                converted[converted_idx++].num = n;
+
+                for (int32_t i = 0; i < n; ++i) {
+                    POP_STACK(false);
+                }
+
+                PUSH_STACK(false);
+                break;
+            }
+
+            default:
+                throw std::invalid_argument { "BUG: unsupported instruction" };
             }
 
 #undef NAT_ARG
 #undef STRING_ARG
+#undef TAG_ARG
 #undef CODE_PTR_ARG
 #undef LOC_G_ARG
 #undef LOC_A_ARG
 #undef LOC_L_ARG
 #undef LOC_C_ARG
+#undef PUSH_STACK
+#undef POP_STACK
+#undef POP_STACK_EXT
         }
 
         if ((bytecode->code_ptr[bytecode_idx - 1] & 0xF0) != 0xF0) {
@@ -1274,7 +1603,7 @@ I_SEXP: {
 }
 
 I_STI:
-    goto I_unsupported;
+    goto I_unsupported; // TODO implement deprecated instruction
 
 I_STA: {
     const value x = stack.back();
@@ -1614,7 +1943,6 @@ I_FAIL: {
     value_to_string(heap, x, os);
 
     throw std::out_of_range { os.str() };
-    goto I_unsupported;
 }
 
 I_PATT_str: {
