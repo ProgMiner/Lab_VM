@@ -334,7 +334,7 @@ struct heap {
 
     void assert_heap_value(value val) const {
         if (!is_heap_value(val)) {
-            throw std::invalid_argument { "argument is not heap value" };
+            throw std::out_of_range { "argument is not heap value" };
         }
     }
 
@@ -523,7 +523,7 @@ static void value_to_string(const struct heap & heap, value v, std::ostringstrea
     }
 
     if (!heap.is_heap_value(v)) {
-        throw std::invalid_argument { "unsupported value" };
+        result << *reinterpret_cast<void **>(&v);
     }
 
     heap_object * const obj = v.object;
@@ -788,13 +788,14 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             converted[converted_idx++].interpreter = interpreter_ptr;
 
-            // TODO check same stack depth on labels
-            // TODO check negative stack depth
             // TODO check is BEGIN after CALL
             // TODO check is BEGIN or CBEGIN in CLOSURE
-            // TODO check stack depth at END is 1
-            // TODO check index of C(_) loc
             // TODO check CBEGIN is only in CLOSURE
+            // TODO check index of C(_) loc
+
+            // TODO check same stack depth on labels
+            // TODO check negative stack depth
+            // TODO check stack depth at END is 1
             // TODO check stack size > 0 at finish (first and last)
 
 #define NAT_ARG(__var) do { \
@@ -1293,15 +1294,11 @@ I_STA: {
         heap_object * const obj = xs.object;
 
         if (index < 0 || static_cast<std::size_t>(index) >= obj->fields_size) {
-            throw std::invalid_argument { "index is out of range" };
+            throw std::out_of_range { "index is out of range" };
         }
 
         switch (obj->get_kind()) {
         case heap_object::STRING:
-            if (!is_fixnum(x.fixnum)) {
-                throw std::invalid_argument { "cannon assign non-integral value in string" };
-            }
-
             reinterpret_cast<int8_t *>(&obj->field(0))[index] = from_fixnum(x.fixnum);
             break;
 
@@ -1311,11 +1308,11 @@ I_STA: {
             break;
 
         case heap_object::CLOSURE:
-            throw std::invalid_argument { "cannot assign value in closure" };
+            throw std::out_of_range { "cannot assign value in closure" };
         }
     } else {
         if (heap.is_heap_value(index_value)) {
-            throw std::invalid_argument { "invalid assignment target" };
+            throw std::out_of_range { "invalid assignment target" };
         }
 
         *index_value.var = x;
@@ -1368,7 +1365,7 @@ I_ELEM: {
     heap_object * const obj = x.object;
 
     if (index < 0 || static_cast<std::size_t>(index) >= obj->fields_size) {
-        throw std::invalid_argument { "index is out of range" };
+        throw std::out_of_range { "index is out of range" };
     }
 
     value result;
@@ -1385,7 +1382,7 @@ I_ELEM: {
         break;
 
     case heap_object::CLOSURE:
-        throw std::invalid_argument { "cannot index closure" };
+        throw std::out_of_range { "cannot index closure" };
     }
 
     stack.emplace_back(result);
@@ -1549,7 +1546,7 @@ I_CALLC: {
     heap_object * const obj = x.object;
 
     if (obj->get_kind() != heap_object::CLOSURE) {
-        throw std::invalid_argument { "cannot call value as closure" };
+        throw std::out_of_range { "cannot call value as closure" };
     }
 
     rip = ip;
@@ -1636,7 +1633,7 @@ I_PATT_str: {
 
             heap_object * const x_obj = x.object;
             if (x_obj->get_kind() != heap_object::STRING) {
-                throw std::invalid_argument { "argument of PATT =str must be string" };
+                throw std::out_of_range { "argument of PATT =str must be string" };
             }
 
             const std::size_t str_size = x_obj->fields_size;
