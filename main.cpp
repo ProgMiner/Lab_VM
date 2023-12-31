@@ -883,8 +883,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             converted[converted_idx++].interpreter = interpreter_ptr;
 
-            // TODO check is BEGIN after CALL
-            // TODO check is BEGIN or CBEGIN in CLOSURE
             // TODO check CBEGIN is only in CLOSURE
             // TODO check index of C(_) loc
 
@@ -919,13 +917,15 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
     __var = _tag; \
 } while (false)
 
-#define CODE_PTR_ARG(__jump) do { \
+#define CODE_PTR_ARG(__orig, __jump) do { \
     const std::size_t _old_bytecode_idx = bytecode_idx; \
 \
     const std::size_t _idx = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx); \
     if (_idx >= bytecode->code_size) { \
         throw std::invalid_argument { "pointer to bytecode out of range" }; \
     } \
+\
+    __orig = _idx; \
 \
     auto & _idx_ins_meta = instructions_meta[_idx]; \
 \
@@ -953,6 +953,13 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 \
         converted[converted_idx++].code = converted_base + 1; \
     } \
+} while (false)
+
+#define CODE_PTR_JUMP_ARG() do { \
+    std::size_t _tmp; \
+    (void) _tmp; \
+\
+    CODE_PTR_ARG(_tmp, true); \
 } while (false)
 
 #define LOC_G_ARG(__var) do { \
@@ -1095,7 +1102,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             case IC::JMP:
-                CODE_PTR_ARG(true);
+                CODE_PTR_JUMP_ARG();
                 barrier = true;
                 break;
 
@@ -1204,7 +1211,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             case IC::CJMPnz:
                 // order is important
                 POP_STACK(false);
-                CODE_PTR_ARG(true);
+                CODE_PTR_JUMP_ARG();
                 break;
 
             case IC::BEGIN:
@@ -1214,7 +1221,17 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
 
             case IC::CLOSURE: {
-                CODE_PTR_ARG(false);
+                std::size_t idx;
+                CODE_PTR_ARG(idx, false);
+
+                switch (bytecode->code_ptr[idx]) {
+                case IC::BEGIN:
+                case IC::CBEGIN:
+                    break;
+
+                default:
+                    throw std::invalid_argument { "CLOSURE must point to BEGIN or CBEGIN" };
+                }
 
                 const uint32_t n = read_from_bytes<uint32_t>(bytecode->code_ptr, bytecode_idx);
                 if (bytecode_idx + n * 5 > bytecode->code_size) {
@@ -1296,7 +1313,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             }
 
             case IC::CALL: {
-                CODE_PTR_ARG(false);
+                std::size_t idx;
+                CODE_PTR_ARG(idx, false);
+
+                if (bytecode->code_ptr[idx] != IC::BEGIN) {
+                    throw std::invalid_argument { "CALL must point to BEGIN" };
+                }
 
                 int32_t args;
                 NAT_ARG(args);
@@ -1383,6 +1405,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 #undef STRING_ARG
 #undef TAG_ARG
 #undef CODE_PTR_ARG
+#undef CODE_PTR_JUMP_ARG
 #undef LOC_G_ARG
 #undef LOC_A_ARG
 #undef LOC_L_ARG
