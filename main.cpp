@@ -809,6 +809,8 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
             ins_meta.converted = converted_base + converted_idx;
             ins_meta.function_idx = current_function_idx;
 
+            const bool was_barrier = barrier;
+
             if (barrier) {
                 if (ins_meta.stack_depth == UINT32_MAX) {
                     ins_meta.stack_depth = stack_depth;
@@ -883,7 +885,6 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             converted[converted_idx++].interpreter = interpreter_ptr;
 
-            // TODO check CBEGIN is only in CLOSURE
             // TODO check index of C(_) loc
 
 #define NAT_ARG(__var) do { \
@@ -957,9 +958,12 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
 #define CODE_PTR_JUMP_ARG() do { \
     std::size_t _tmp; \
-    (void) _tmp; \
 \
     CODE_PTR_ARG(_tmp, true); \
+\
+    if (bytecode->code_ptr[_tmp] == IC::CBEGIN) { \
+        throw std::invalid_argument { "CBEGIN must be used only in CLOSURE" }; \
+    } \
 } while (false)
 
 #define LOC_G_ARG(__var) do { \
@@ -1108,6 +1112,7 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
 
             case IC::END:
                 POP_STACK(false);
+                barrier = true;
                 break;
 
             case IC::DROP: {
@@ -1215,7 +1220,18 @@ static void interpret(const std::shared_ptr<bytecode_contents> & bytecode) {
                 break;
 
             case IC::BEGIN:
+                NAT_ARG(converted[converted_idx++].num);
+                NAT_ARG(converted[converted_idx++].num);
+                break;
+
             case IC::CBEGIN:
+                if (!was_barrier) {
+                    // ATTENTION there are checks in all CODE_PTR instructions that there aren't
+                    //           jumps and CALLs to CBEGIN. Only CLOSURE is allowed
+
+                    throw std::invalid_argument { "CBEGIN must be used only in CLOSURE" };
+                }
+
                 NAT_ARG(converted[converted_idx++].num);
                 NAT_ARG(converted[converted_idx++].num);
                 break;
