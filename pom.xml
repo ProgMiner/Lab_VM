@@ -101,6 +101,8 @@
                         </goals>
 
                         <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+
                             <artifactSet>
                                 <excludes>
                                     <exclude>org.graalvm.truffle:truffle-api</exclude>
