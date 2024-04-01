@@ -1,4 +1,4 @@
-package ru.byprogminer.lamagraalvm.expr;
+package ru.byprogminer.lamagraalvm.ast;
 
 import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.nodes.RootNode;

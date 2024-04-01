@@ -11,6 +11,7 @@
     <properties>
         <graalvm.version>23.0.3</graalvm.version>
         <lombok.version>1.18.32</lombok.version>
+        <antlr.version>4.13.1</antlr.version>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
@@ -20,6 +21,12 @@
             <groupId>org.graalvm.truffle</groupId>
             <artifactId>truffle-api</artifactId>
             <version>${graalvm.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.antlr</groupId>
+            <artifactId>antlr4-runtime</artifactId>
+            <version>${antlr.version}</version>
         </dependency>
 
         <dependency>
@@ -40,6 +47,25 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.antlr</groupId>
+                <artifactId>antlr4-maven-plugin</artifactId>
+                <version>${antlr.version}</version>
+
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>antlr4</goal>
+                        </goals>
+                    </execution>
+                </executions>
+
+                <configuration>
+                    <visitor>true</visitor>
+                    <listener>false</listener>
+                </configuration>
+            </plugin>
+
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.11.0</version>
@@ -59,6 +85,31 @@
                         </path>
                     </annotationProcessorPaths>
                 </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.1.1</version>
+
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+
+                        <configuration>
+                            <artifactSet>
+                                <excludes>
+                                    <exclude>org.graalvm.truffle:truffle-api</exclude>
+                                    <exclude>org.graalvm.sdk:graal-sdk</exclude>
+                                </excludes>
+                            </artifactSet>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

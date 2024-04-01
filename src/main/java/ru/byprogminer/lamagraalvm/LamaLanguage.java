@@ -2,8 +2,13 @@ package ru.byprogminer.lamagraalvm;
 
 import com.oracle.truffle.api.CallTarget;
 import com.oracle.truffle.api.TruffleLanguage;
+import com.oracle.truffle.api.source.Source;
 import lombok.NoArgsConstructor;
-import ru.byprogminer.lamagraalvm.expr.IntLiteral;
+import org.antlr.v4.runtime.CharStream;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonTokenStream;
+import ru.byprogminer.lamagraalvm.ast.LamaExpr;
+import ru.byprogminer.lamagraalvm.parser.*;
 
 @TruffleLanguage.Registration(
         id = LamaLanguage.ID,
@@ -29,6 +34,22 @@ public class LamaLanguage extends TruffleLanguage<LamaContext> {
 
     @Override
     protected CallTarget parse(ParsingRequest request) {
-        return new IntLiteral(this, 0).getCallTarget();
+        final LamaLexer lexer = new LamaLexer(sourceToCharStream(request.getSource()));
+        lexer.removeErrorListeners();
+        lexer.addErrorListener(ThrowingErrorListener.INSTANCE);
+
+        final LamaParser parser = new LamaParser(new CommonTokenStream(lexer));
+        parser.removeErrorListeners();
+        parser.addErrorListener(ThrowingErrorListener.INSTANCE);
+
+        final LamaParser.ExprContext exprCtx = parser.expr();
+
+        final LamaVisitor<LamaExpr> visitor = new LamaAstVisitor(this);
+        final LamaExpr expr = visitor.visitExpr(exprCtx);
+        return expr.getCallTarget();
+    }
+
+    private static CharStream sourceToCharStream(Source src) {
+        return CharStreams.fromString(src.getCharacters().toString(), src.getPath());
     }
 }
