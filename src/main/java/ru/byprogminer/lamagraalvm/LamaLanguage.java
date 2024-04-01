@@ -42,10 +42,10 @@ public class LamaLanguage extends TruffleLanguage<LamaContext> {
         parser.removeErrorListeners();
         parser.addErrorListener(ThrowingErrorListener.INSTANCE);
 
-        final LamaParser.ExprContext exprCtx = parser.expr();
+        final LamaParser.ProgramContext exprCtx = parser.program();
 
         final LamaVisitor<LamaExpr> visitor = new LamaAstVisitor(this);
-        final LamaExpr expr = visitor.visitExpr(exprCtx);
+        final LamaExpr expr = visitor.visitProgram(exprCtx);
         return expr.getCallTarget();
     }
 
