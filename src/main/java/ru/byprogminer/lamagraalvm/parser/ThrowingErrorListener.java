@@ -20,6 +20,10 @@ public final class ThrowingErrorListener extends BaseErrorListener {
             String msg,
             RecognitionException e
     ) {
+        throwException(line, charPositionInLine, msg);
+    }
+
+    public static void throwException(int line, int charPositionInLine, String msg) {
         throw new ParseCancellationException(line + ":" + charPositionInLine + " - " + msg);
     }
 }

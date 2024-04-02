@@ -22,14 +22,14 @@ program: scopeExpr EOF;
 scopeExpr: definition* expr?;
 
 definition
-    : 'var' vars+=varDefItem (',' vars+=varDefItem)* ';'    # varDef
-    | 'fun' LIDENT '(' funArgs ')' '{' scopeExpr '}'        # funDef
+    : 'var' varDefItem (',' varDefItem)* ';'            # varDef
+    | 'fun' LIDENT '(' funArgs ')' '{' scopeExpr '}'    # funDef
     ;
 
 varDefItem: LIDENT ('=' basicExpr)?;
-funArgs: (args+=LIDENT (',' args+=LIDENT)*)?;
+funArgs: (LIDENT (',' LIDENT)*)?;
 
-expr: exprs+=basicExpr (';' exprs+=basicExpr)*;
+expr: basicExpr (';' basicExpr)*;
 basicExpr: binaryExpr;
 
 binaryExpr
@@ -46,9 +46,9 @@ binaryExpr
 binaryOperand: '-'? postfixExpr;
 
 postfixExpr
-    : primaryExpr                                           #postfixExprPrimary
-    | postfixExpr '(' (args+=expr (',' args+=expr)*)? ')'   #postfixExprCall
-    | postfixExpr '[' expr ']'                              #postfixExprSubscript
+    : primaryExpr                               #postfixExprPrimary
+    | postfixExpr '(' (expr (',' expr)*)? ')'   #postfixExprCall
+    | postfixExpr '[' expr ']'                  #postfixExprSubscript
     ;
 
 primaryExpr
@@ -61,12 +61,12 @@ primaryExpr
     | 'fun' '(' funArgs ')' '{' scopeExpr '}'           #primaryExprFun
     | 'skip'                                            #primaryExprSkip
     | '(' scopeExpr ')'                                 #primaryExprScope
-    | '{' (items+=expr (',' items+=expr)*)? '}'         #primaryExprList
-    | '[' (items+=expr (',' items+=expr)*)? ']'         #primaryExprArray
-    | UIDENT ('(' args+=expr (',' args+=expr)* ')')?    #primaryExprSexp
+    | '{' (expr (',' expr)*)? '}'                       #primaryExprList
+    | '[' (expr (',' expr)*)? ']'                       #primaryExprArray
+    | UIDENT ('(' expr (',' expr)* ')')?                #primaryExprSexp
     | 'if' conds+=expr 'then' thens+=scopeExpr
      ('elif' conds+=expr 'then' thens+=scopeExpr)*
-     ('else' else=expr)
+     ('else' else=scopeExpr)
       'fi'                                              #primaryExprIf
     | 'while' cond=expr 'do' body=scopeExpr 'od'        #primaryExprWhile
     | 'do' body=scopeExpr 'while' cond=expr 'od'        #primaryExprDo
