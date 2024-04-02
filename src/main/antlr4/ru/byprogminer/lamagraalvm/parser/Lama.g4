@@ -73,4 +73,33 @@ primaryExpr
     | 'do' body=scopeExpr 'while' cond=expr 'od'        #primaryExprDo
     | 'for' init=scopeExpr ',' cond=expr ',' post=expr
       'do' body=scopeExpr 'od'                          #primaryExprFor
+    | 'case' expr 'of' caseBranch ('|' caseBranch)* 'esac' #primaryExprCase
+    ;
+
+caseBranch: pattern '->' scopeExpr;
+
+pattern
+    : consPattern   #patternCons
+    | simplePattern #patternSimple
+    ;
+
+consPattern: simplePattern ':' pattern;
+
+simplePattern
+    : '_'                                       #simplePatternWildcard
+    | UIDENT ('(' pattern (',' pattern)* ')')?  #simplePatternSexp
+    | '[' (pattern (',' pattern)*)? ']'         #simplePatternArray
+    | '{' (pattern (',' pattern)*)? '}'         #simplePatternList
+    | LIDENT ('@' pattern)?                     #simplePatternNamed
+    | '-'? DECIMAL      #simplePatternDecimal
+    | STRING            #simplePatternString
+    | CHAR              #simplePatternChar
+    | 'true'            #simplePatternTrue
+    | 'false'           #simplePatternFalse
+    | '#' 'box'         #simplePatternBoxShape
+    | '#' 'val'         #simplePatternValShape
+    | '#' 'str'         #simplePatternStrShape
+    | '#' 'array'       #simplePatternArrShape
+    | '#' 'fun'         #simplePatternFunShape
+    | '(' pattern ')'   #simplePatternParens
     ;
