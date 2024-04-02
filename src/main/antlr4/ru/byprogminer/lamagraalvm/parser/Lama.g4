@@ -12,8 +12,8 @@ BLOCK_COMMENT: '(*' (BLOCK_COMMENT | .)*? '*)' -> skip;
 UIDENT: [A-Z] W*;
 LIDENT: [a-z] W*;
 DECIMAL: [0-9]+;
-STRING: '"' ([^"] | '""')* '"';
-CHAR: '\'' ([^'] | '\'\'' | '\\n' | '\\t' ) '\'';
+STRING: '"' (~'"' | '""')* '"';
+CHAR: '\'' (~['] | '\'\'' | '\\n' | '\\t' ) '\'';
 
 // Grammar
 
@@ -46,9 +46,10 @@ binaryExpr
 binaryOperand: '-'? postfixExpr;
 
 postfixExpr
-    : primaryExpr                               #postfixExprPrimary
-    | postfixExpr '(' (expr (',' expr)*)? ')'   #postfixExprCall
-    | postfixExpr '[' expr ']'                  #postfixExprSubscript
+    : primaryExpr                                           #postfixExprPrimary
+    | postfixExpr '(' (expr (',' expr)*)? ')'               #postfixExprCall
+    | postfixExpr '[' expr ']'                              #postfixExprSubscript
+    | postfixExpr '.' LIDENT ('(' expr (',' expr)* ')')?    #postfixExprDotCall
     ;
 
 primaryExpr

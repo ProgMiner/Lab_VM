@@ -15,7 +15,7 @@ import ru.byprogminer.lamagraalvm.runtime.LamaFun;
 public class Call extends LamaExpr {
 
     @Child @NonNull LamaExpr fun;
-    @Children @NonNull LamaExpr[] args;
+    @Children @NonNull LamaExpr @NonNull[] args;
 
     // TODO specialize
 

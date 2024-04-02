@@ -8,7 +8,9 @@ import org.antlr.v4.runtime.tree.TerminalNode;
 import ru.byprogminer.lamagraalvm.LamaLanguage;
 import ru.byprogminer.lamagraalvm.nodes.*;
 import ru.byprogminer.lamagraalvm.nodes.builtin.Builtins;
+import ru.byprogminer.lamagraalvm.runtime.LamaString;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -186,21 +188,41 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             sort.assertVal();
 
             final LamaExpr fun = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
-
-            final List<LamaParser.ExprContext> argsCtx = ctx.expr();
-            final LamaExpr[] args = new LamaExpr[argsCtx.size()];
-
-            for (int i = 0; i < args.length; ++i) {
-                args[i] = visitExpr(argsCtx.get(i)).make(LamaExprSort.VAL);
-            }
-
+            final LamaExpr[] args = exprListToArray(ctx.expr());
             return new Call(fun, args);
         };
     }
 
     @Override
     public LamaExprFactory visitPostfixExprSubscript(LamaParser.PostfixExprSubscriptContext ctx) {
-        throw new UnsupportedOperationException("subscript");
+        return sort -> {
+            final LamaExpr value = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
+            final LamaExpr index = visitExpr(ctx.expr()).make(LamaExprSort.VAL);
+
+            return switch (sort) {
+                case VAL -> SubscriptNodeGen.create(value, index);
+                case REF -> SubscriptRefNodeGen.create(value, index);
+            };
+        };
+    }
+
+    @Override
+    public LamaExprFactory visitPostfixExprDotCall(LamaParser.PostfixExprDotCallContext ctx) {
+        return sort -> {
+            sort.assertVal();
+
+            final LamaExpr fun = createName(ctx.LIDENT().getSymbol(), LamaExprSort.VAL);
+
+            final List<LamaParser.ExprContext> argsCtx = ctx.expr();
+            final LamaExpr[] args = new LamaExpr[argsCtx.size() + 1];
+            args[0] = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
+
+            for (int i = 1; i < args.length; ++i) {
+                args[i] = visitExpr(argsCtx.get(i - 1)).make(LamaExprSort.VAL);
+            }
+
+            return new Call(fun, args);
+        };
     }
 
     @Override
@@ -213,27 +235,24 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitPrimaryExprString(LamaParser.PrimaryExprStringContext ctx) {
-        throw new UnsupportedOperationException("string");
+        return sort -> {
+            sort.assertVal();
+
+            return new StringLiteral(convertStringLiteral(ctx.STRING().getText()));
+        };
     }
 
     @Override
     public LamaExprFactory visitPrimaryExprChar(LamaParser.PrimaryExprCharContext ctx) {
-        throw new UnsupportedOperationException("char");
+        return sort -> {
+            sort.assertVal();
+            return new Constant(decodeCharLiteral(ctx.CHAR().getText()));
+        };
     }
 
     @Override
     public LamaExprFactory visitPrimaryExprId(LamaParser.PrimaryExprIdContext ctx) {
-        return sort -> {
-            final int[] depth = new int[] { 0 };
-            final int slot = currentScope.getSlotRec(ctx.LIDENT().getSymbol(), depth);
-
-            // TODO nested scopes
-
-            return switch (sort) {
-                case VAL -> NameNodeGen.create(slot, depth[0]);
-                case REF -> NameRefNodeGen.create(slot, depth[0]);
-            };
-        };
+        return sort -> createName(ctx.LIDENT().getSymbol(), sort);
     }
 
     @Override
@@ -281,7 +300,11 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitPrimaryExprArray(LamaParser.PrimaryExprArrayContext ctx) {
-        throw new UnsupportedOperationException("array");
+        return sort -> {
+            sort.assertVal();
+
+            return new Array(exprListToArray(ctx.expr()));
+        };
     }
 
     @Override
@@ -362,6 +385,17 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         };
     }
 
+    private LamaExpr createName(Token id, LamaExprSort sort) {
+        final int[] depth = new int[] { 0 };
+
+        final int slot = currentScope.getSlotRec(id, depth);
+
+        return switch (sort) {
+            case VAL -> NameNodeGen.create(slot, depth[0]);
+            case REF -> NameRefNodeGen.create(slot, depth[0]);
+        };
+    }
+
     private LamaExpr createFun(LamaParser.FunArgsContext argsCtx, LamaParser.ScopeExprContext bodyCtx, String name) {
         final Scope scope = currentScope;
 
@@ -392,6 +426,16 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         }
     }
 
+    private LamaExpr[] exprListToArray(List<LamaParser.ExprContext> values) {
+        final LamaExpr[] result = new LamaExpr[values.size()];
+
+        for (int i = 0; i < result.length; ++i) {
+            result[i] = visitExpr(values.get(i)).make(LamaExprSort.VAL);
+        }
+
+        return result;
+    }
+
     private static LamaExpr concat(LamaExpr lhs, LamaExpr rhs) {
         if (lhs == null) {
             return rhs;
@@ -414,6 +458,28 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         }
 
         return expr;
+    }
+
+    private static LamaString convertStringLiteral(String string) {
+        final String plain = string.substring(1, string.length() - 1).replaceAll("\"\"", "\"");
+
+        return new LamaString(plain.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static int decodeCharLiteral(String value) {
+        final String str = value.substring(1, value.length() - 1);
+
+        switch (str) {
+            case "''": return '\'';
+            case "\\n": return '\n';
+            case "\\t": return '\t';
+        }
+
+        if (str.length() > 1) {
+            throw new IllegalArgumentException("illegal char literal");
+        }
+
+        return str.charAt(0);
     }
 
     public enum LamaExprSort {

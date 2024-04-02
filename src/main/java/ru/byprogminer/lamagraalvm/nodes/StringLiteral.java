@@ -4,21 +4,17 @@ import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.NodeInfo;
 import lombok.EqualsAndHashCode;
 import lombok.Value;
+import ru.byprogminer.lamagraalvm.runtime.LamaString;
 
 @Value
 @EqualsAndHashCode(callSuper = true)
-@NodeInfo(shortName = "const", description = "constant long value expression")
-public class Constant extends LamaExpr {
+@NodeInfo(shortName = "string", description = "string literal")
+public class StringLiteral extends LamaExpr {
 
-    long value;
-
-    @Override
-    public long executeLong(VirtualFrame frame) {
-        return value;
-    }
+    LamaString value;
 
     @Override
     public Object execute(VirtualFrame frame) {
-        return executeLong(frame);
+        return value.clone();
     }
 }

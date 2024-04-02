@@ -11,10 +11,7 @@ import com.oracle.truffle.api.nodes.UnexpectedResultException;
 import ru.byprogminer.lamagraalvm.LamaLanguage;
 import ru.byprogminer.lamagraalvm.LamaTypes;
 import ru.byprogminer.lamagraalvm.LamaTypesGen;
-import ru.byprogminer.lamagraalvm.runtime.LamaArray;
-import ru.byprogminer.lamagraalvm.runtime.LamaFun;
-import ru.byprogminer.lamagraalvm.runtime.LamaRef;
-import ru.byprogminer.lamagraalvm.runtime.LamaSexp;
+import ru.byprogminer.lamagraalvm.runtime.*;
 
 @NodeInfo(
         shortName = "expr",
@@ -32,8 +29,8 @@ public abstract class LamaExpr extends Node {
         return LamaTypesGen.expectLamaRef(this.execute(frame));
     }
 
-    public String executeString(VirtualFrame frame) throws UnexpectedResultException {
-        return LamaTypesGen.expectString(this.execute(frame));
+    public LamaString executeString(VirtualFrame frame) throws UnexpectedResultException {
+        return LamaTypesGen.expectLamaString(this.execute(frame));
     }
 
     public LamaArray executeArray(VirtualFrame frame) throws UnexpectedResultException {
