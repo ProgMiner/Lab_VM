@@ -18,10 +18,14 @@ public class If extends LamaExpr {
 
     @Override
     public Object execute(VirtualFrame frame) {
-        if (conditionProfile.profile(executeCond(frame, cond))) {
+        if (conditionProfile.profile(executeCond(frame))) {
             return thenBranch.execute(frame);
         } else {
             return elseBranch.execute(frame);
         }
+    }
+
+    private boolean executeCond(VirtualFrame frame) {
+        return executeCond(frame, cond);
     }
 }

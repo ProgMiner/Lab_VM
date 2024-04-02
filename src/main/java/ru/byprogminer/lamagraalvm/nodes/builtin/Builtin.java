@@ -29,7 +29,7 @@ public abstract class Builtin extends LamaExpr {
         final LamaExpr[] args = new LamaExpr[signature.size()];
         for (int i = 0; i < args.length; i++) {
             descriptorBuilder.addSlot(FrameSlotKind.Illegal, null, null);
-            args[i] = NameNodeGen.create(i);
+            args[i] = NameNodeGen.create(i, 0);
         }
 
         final T node = factory.createNode((Object) args);

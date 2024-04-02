@@ -64,7 +64,7 @@ public class LamaLanguage extends TruffleLanguage<LamaContext> {
 
         final Builtins builtins = new Builtins(this, context.getOut(), context.getIn());
 
-        final LamaAstVisitor visitor = new LamaAstVisitor(builtins);
+        final LamaAstVisitor visitor = new LamaAstVisitor(this, builtins);
         final LamaExpr expr = visitor.visitProgram(exprCtx).make(LamaAstVisitor.LamaExprSort.VAL);
 
         final LamaRootNode root = new MainRootNode(this, visitor.createFrameDescriptor(), expr, builtins);

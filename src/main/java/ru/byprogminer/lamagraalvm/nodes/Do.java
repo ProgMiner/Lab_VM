@@ -24,7 +24,11 @@ public class Do extends LamaLoopNode {
         public boolean executeRepeating(VirtualFrame frame) {
             body.execute(frame);
 
-            return executeCond(frame, cond);
+            return executeCond(frame);
+        }
+
+        private boolean executeCond(VirtualFrame frame) {
+            return LamaExpr.executeCond(frame, cond);
         }
     }
 }

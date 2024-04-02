@@ -4,6 +4,8 @@ import com.oracle.truffle.api.frame.FrameDescriptor;
 import com.oracle.truffle.api.frame.FrameSlotKind;
 import lombok.RequiredArgsConstructor;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.tree.TerminalNode;
+import ru.byprogminer.lamagraalvm.LamaLanguage;
 import ru.byprogminer.lamagraalvm.nodes.*;
 import ru.byprogminer.lamagraalvm.nodes.builtin.Builtins;
 
@@ -15,9 +17,13 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFactory> {
 
+    private final LamaLanguage language;
+
     private Scope currentScope = new Scope(null);
 
-    public LamaAstVisitor(Builtins builtins) {
+    public LamaAstVisitor(LamaLanguage language, Builtins builtins) {
+        this.language = language;
+
         builtins.initBuiltins(currentScope.frameDescriptorBuilder);
 
         for (final Builtins.BuiltinInfo b : builtins.getBuiltins()) {
@@ -68,7 +74,14 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitFunDef(LamaParser.FunDefContext ctx) {
-        throw new UnsupportedOperationException("fun def");
+        return sort -> {
+            final Token name = ctx.LIDENT().getSymbol();
+
+            return AssignNameNodeGen.create(
+                    createFun(ctx.funArgs(), ctx.scopeExpr(), name.getText()),
+                    currentScope.getSlot(name)
+            );
+        };
     }
 
     @Override
@@ -211,13 +224,14 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprId(LamaParser.PrimaryExprIdContext ctx) {
         return sort -> {
-            final int slot = currentScope.getSlot(ctx.LIDENT().getSymbol());
+            final int[] depth = new int[] { 0 };
+            final int slot = currentScope.getSlotRec(ctx.LIDENT().getSymbol(), depth);
 
             // TODO nested scopes
 
             return switch (sort) {
-                case VAL -> NameNodeGen.create(slot);
-                case REF -> NameRefNodeGen.create(slot);
+                case VAL -> NameNodeGen.create(slot, depth[0]);
+                case REF -> NameRefNodeGen.create(slot, depth[0]);
             };
         };
     }
@@ -240,7 +254,11 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitPrimaryExprFun(LamaParser.PrimaryExprFunContext ctx) {
-        throw new UnsupportedOperationException("fun value");
+        return sort -> {
+            sort.assertVal();
+
+            return createFun(ctx.funArgs(), ctx.scopeExpr(), null);
+        };
     }
 
     @Override
@@ -344,6 +362,36 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         };
     }
 
+    private LamaExpr createFun(LamaParser.FunArgsContext argsCtx, LamaParser.ScopeExprContext bodyCtx, String name) {
+        final Scope scope = currentScope;
+
+        final Scope funScope = new Scope(scope);
+        currentScope = funScope;
+
+        try {
+            List<TerminalNode> args = argsCtx.LIDENT();
+
+            for (final TerminalNode arg : args) {
+                currentScope.createSlot(arg.getSymbol());
+            }
+
+            final LamaExpr body = visitScopeExpr(bodyCtx).make(LamaExprSort.VAL);
+
+            final FrameDescriptor frameDescriptor = funScope.createFrameDescriptor();
+            final LamaRootNode rootNode;
+
+            if (name == null) {
+                rootNode = new LamaRootNode(language, frameDescriptor, body, args.size());
+            } else {
+                rootNode = new NamedRootNode(language, frameDescriptor, body, args.size(), name);
+            }
+
+            return new Fun(rootNode.getCallTarget());
+        } finally {
+            currentScope = scope;
+        }
+    }
+
     private static LamaExpr concat(LamaExpr lhs, LamaExpr rhs) {
         if (lhs == null) {
             return rhs;
@@ -419,6 +467,23 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             }
 
             return result;
+        }
+
+        private int getSlotRec(Token id, int[] depth) {
+            for (Scope scope = this; scope != null; scope = scope.parent) {
+                final Integer result = scope.slots.get(id.getText());
+
+                if (result != null) {
+                    return result;
+                }
+
+                ++depth[0];
+            }
+
+            ThrowingErrorListener.throwException(id.getLine(), id.getCharPositionInLine(),
+                    "id \"" + id.getText() + "\" is not defined");
+
+            return 0; // not reachable
         }
 
         private FrameDescriptor createFrameDescriptor() {

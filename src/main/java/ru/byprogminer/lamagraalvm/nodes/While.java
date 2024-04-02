@@ -22,12 +22,16 @@ public class While extends LamaLoopNode {
 
         @Override
         public boolean executeRepeating(VirtualFrame frame) {
-            if (!executeCond(frame, cond)) {
+            if (!executeCond(frame)) {
                 return false;
             }
 
             body.execute(frame);
             return true;
+        }
+
+        private boolean executeCond(VirtualFrame frame) {
+            return LamaExpr.executeCond(frame, cond);
         }
     }
 }
