@@ -66,7 +66,7 @@ primaryExpr
     | UIDENT ('(' expr (',' expr)* ')')?                #primaryExprSexp
     | 'if' conds+=expr 'then' thens+=scopeExpr
      ('elif' conds+=expr 'then' thens+=scopeExpr)*
-     ('else' else=scopeExpr)
+     ('else' else=scopeExpr)?
       'fi'                                              #primaryExprIf
     | 'while' cond=expr 'do' body=scopeExpr 'od'        #primaryExprWhile
     | 'do' body=scopeExpr 'while' cond=expr 'od'        #primaryExprDo

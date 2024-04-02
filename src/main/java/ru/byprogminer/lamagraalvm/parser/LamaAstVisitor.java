@@ -7,6 +7,7 @@ import org.antlr.v4.runtime.Token;
 import ru.byprogminer.lamagraalvm.nodes.*;
 import ru.byprogminer.lamagraalvm.nodes.builtin.Builtins;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -272,17 +273,61 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitPrimaryExprIf(LamaParser.PrimaryExprIfContext ctx) {
-        throw new UnsupportedOperationException("if");
+        return sort -> {
+            final List<LamaParser.ExprContext> conds = ctx.conds;
+            final List<LamaParser.ScopeExprContext> thens = ctx.thens;
+
+            final List<LamaExpr[]> branches = new ArrayList<>();
+
+            final int branchesSize = conds.size();
+            for (int i = 0; i < branchesSize; ++i) {
+                final LamaExpr cond = visitExpr(conds.get(i)).make(LamaExprSort.VAL);
+                final LamaExpr then = visitScopeExpr(thens.get(i)).make(sort);
+
+                branches.add(new LamaExpr[]{ cond, then });
+            }
+
+            LamaExpr result;
+
+            if (ctx.else_ == null) {
+                sort.assertVal();
+                result = new Constant(0);
+            } else {
+                result = visitScopeExpr(ctx.else_).make(sort);
+            }
+
+            for (int i = branchesSize - 1; i >= 0; --i) {
+                final LamaExpr[] cb = branches.get(i);
+
+                result = new If(cb[0], cb[1], result);
+            }
+
+            return result;
+        };
     }
 
     @Override
     public LamaExprFactory visitPrimaryExprWhile(LamaParser.PrimaryExprWhileContext ctx) {
-        throw new UnsupportedOperationException("while");
+        return sort -> {
+            sort.assertVal();
+
+            final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
+            final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
+
+            return WhileNodeGen.create(body, cond);
+        };
     }
 
     @Override
     public LamaExprFactory visitPrimaryExprDo(LamaParser.PrimaryExprDoContext ctx) {
-        throw new UnsupportedOperationException("do");
+        return sort -> {
+            sort.assertVal();
+
+            final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
+            final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
+
+            return new Do(body, cond);
+        };
     }
 
     @Override
