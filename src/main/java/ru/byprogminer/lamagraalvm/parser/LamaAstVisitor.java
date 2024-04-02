@@ -14,7 +14,6 @@ import ru.byprogminer.lamagraalvm.runtime.LamaArray;
 import ru.byprogminer.lamagraalvm.runtime.LamaFun;
 import ru.byprogminer.lamagraalvm.runtime.LamaString;
 
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 @RequiredArgsConstructor
@@ -508,7 +507,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     private static LamaString convertStringLiteral(String string) {
         final String plain = string.substring(1, string.length() - 1).replaceAll("\"\"", "\"");
 
-        return new LamaString(plain.getBytes(StandardCharsets.UTF_8));
+        return LamaString.ofString(plain);
     }
 
     private static int decodeCharLiteral(Token token) {

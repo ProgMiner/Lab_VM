@@ -34,5 +34,4 @@ public class Call extends LamaExpr {
 
         return fun.callTarget().call(args);
     }
-
 }

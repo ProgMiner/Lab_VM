@@ -39,6 +39,7 @@ public class Builtins {
                 b.setOut(out)));
 
         registerBuiltin(Builtin.createBuiltin(language, "length", LengthBuiltinFactory.getInstance()));
+        registerBuiltin(Builtin.createBuiltin(language, "string", StringBuiltinFactory.getInstance()));
 
         this.descriptorBuilder = null;
     }
