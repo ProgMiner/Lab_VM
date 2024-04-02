@@ -5,4 +5,6 @@ MAIN=ru.byprogminer.lamagraalvm.Main
 
 # DEBUG='-Xdebug -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005'
 
-"$JAVA_HOME/bin/java" $DEBUG -cp "$JAR" "-Dtruffle.class.path.append=$JAR" "$MAIN" "$@"
+# TODO fix stack overflow
+
+"$JAVA_HOME/bin/java" -Xss2m $DEBUG -cp "$JAR" "-Dtruffle.class.path.append=$JAR" "$MAIN" "$@"

@@ -138,14 +138,4 @@ public abstract class BinaryOperator extends LamaExpr {
             return lhs != 0 || rhs != 0 ? 1 : 0;
         }
     }
-
-    @GenerateNodeFactory
-    @NodeInfo(shortName = ":", description = "binary cons operator")
-    public static abstract class Cons extends BinaryOperator {
-
-        @Specialization
-        public Object cons(Object lhs, Object rhs) {
-            throw new UnsupportedOperationException("cons");
-        }
-    }
 }
