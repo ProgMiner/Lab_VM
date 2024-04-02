@@ -14,6 +14,8 @@ public class Seq extends LamaExpr {
     @Child @NonNull LamaExpr lhs;
     @Child @NonNull LamaExpr rhs;
 
+    // TODO specialize
+
     @Override
     public Object execute(VirtualFrame frame) {
         lhs.execute(frame);

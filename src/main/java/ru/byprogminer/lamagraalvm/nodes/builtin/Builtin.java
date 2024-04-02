@@ -25,17 +25,17 @@ public abstract class Builtin extends LamaExpr {
     ) {
         final List<Class<? extends Node>> signature = factory.getExecutionSignature();
 
-        final FrameDescriptor.Builder descriptorBuilder = Call.createFrameDescriptorBuilder();
+        final FrameDescriptor.Builder descriptorBuilder = FrameDescriptor.newBuilder();
         final LamaExpr[] args = new LamaExpr[signature.size()];
         for (int i = 0; i < args.length; i++) {
             descriptorBuilder.addSlot(FrameSlotKind.Illegal, null, null);
-            args[i] = NameNodeGen.create(i + 1);
+            args[i] = NameNodeGen.create(i);
         }
 
         final T node = factory.createNode((Object) args);
         processor.accept(node);
 
-        final LamaRootNode rootNode = new NamedRootNode(language, descriptorBuilder.build(), node, name);
+        final LamaRootNode rootNode = new NamedRootNode(language, descriptorBuilder.build(), node, args.length, name);
         return new LamaFun(rootNode.getCallTarget(), null);
     }
 

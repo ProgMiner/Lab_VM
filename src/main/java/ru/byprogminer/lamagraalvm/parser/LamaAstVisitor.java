@@ -74,8 +74,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaExpr> {
             return null;
         }
 
-        // TODO assign
-        return visitBasicExpr(value);
+        return AssignNameNodeGen.create(visitBasicExpr(value), currentScope.getSlot(ctx.LIDENT().getSymbol()));
     }
 
     @Override
@@ -267,7 +266,8 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaExpr> {
 
         private final Map<String, Integer> slots = new HashMap<>();
 
-        final FrameDescriptor.Builder frameDescriptorBuilder = Call.createFrameDescriptorBuilder();
+        final FrameDescriptor.Builder frameDescriptorBuilder = FrameDescriptor.newBuilder()
+                .defaultValue(0L);
 
         private void createSlot(Token id) {
             final String name = id.getText();

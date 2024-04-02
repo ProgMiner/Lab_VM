@@ -1,8 +1,6 @@
 package ru.byprogminer.lamagraalvm.nodes;
 
 import com.oracle.truffle.api.CompilerAsserts;
-import com.oracle.truffle.api.frame.FrameDescriptor;
-import com.oracle.truffle.api.frame.FrameSlotKind;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.NodeInfo;
 import lombok.Data;
@@ -18,6 +16,8 @@ public class Call extends LamaExpr {
 
     @Child @NonNull LamaExpr fun;
     @Children @NonNull LamaExpr[] args;
+
+    // TODO specialize
 
     @SneakyThrows
     @Override
@@ -35,10 +35,4 @@ public class Call extends LamaExpr {
         return fun.callTarget().call(args);
     }
 
-    public static FrameDescriptor.Builder createFrameDescriptorBuilder() {
-        final FrameDescriptor.Builder result = FrameDescriptor.newBuilder().defaultValue(0L);
-
-        result.addSlot(FrameSlotKind.Object, "parent scope", null);
-        return result;
-    }
 }

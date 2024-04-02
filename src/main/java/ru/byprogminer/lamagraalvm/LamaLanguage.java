@@ -79,7 +79,7 @@ public class LamaLanguage extends TruffleLanguage<LamaContext> {
         private final Builtins builtins;
 
         public MainRootNode(LamaLanguage language, FrameDescriptor frameDescriptor, LamaExpr expr, Builtins builtins) {
-            super(language, frameDescriptor, expr);
+            super(language, frameDescriptor, expr, 0);
 
             this.builtins = Objects.requireNonNull(builtins);
         }

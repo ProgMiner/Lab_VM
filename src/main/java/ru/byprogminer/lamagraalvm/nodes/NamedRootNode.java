@@ -9,8 +9,14 @@ public class NamedRootNode extends LamaRootNode {
 
     private final String name;
 
-    public NamedRootNode(LamaLanguage language, FrameDescriptor frameDescriptor, LamaExpr expr, String name) {
-        super(language, frameDescriptor, expr);
+    public NamedRootNode(
+            LamaLanguage language,
+            FrameDescriptor frameDescriptor,
+            LamaExpr expr,
+            int arguments,
+            String name
+    ) {
+        super(language, frameDescriptor, expr, arguments);
 
         this.name = Objects.requireNonNull(name);
     }

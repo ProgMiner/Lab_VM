@@ -4,6 +4,5 @@ JAR=target/lama-graalvm-1.0-SNAPSHOT.jar
 MAIN=ru.byprogminer.lamagraalvm.Main
 
 # DEBUG='-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005'
-DEBUG=
 
 "$JAVA_HOME/bin/java" $DEBUG -cp "$JAR" "-Dtruffle.class.path.append=$JAR" "$MAIN" "$@"
