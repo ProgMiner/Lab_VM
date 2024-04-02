@@ -314,7 +314,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
             final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
 
-            return WhileNodeGen.create(body, cond);
+            return new While(cond, body);
         };
     }
 

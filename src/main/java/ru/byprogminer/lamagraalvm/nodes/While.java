@@ -1,28 +1,33 @@
 package ru.byprogminer.lamagraalvm.nodes;
 
-import com.oracle.truffle.api.dsl.NodeChild;
-import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.NodeInfo;
+import com.oracle.truffle.api.nodes.RepeatingNode;
 import lombok.NonNull;
 import lombok.RequiredArgsConstructor;
 
-@RequiredArgsConstructor
-@NodeChild(value = "cond", type = LamaExpr.class)
 @NodeInfo(shortName = "while", description = "while loop")
-public abstract class While extends LamaExpr {
+public class While extends LamaLoopNode {
 
-    @Child @NonNull private LamaExpr body;
+    public While(LamaExpr cond, LamaExpr body) {
+        super(new WhileRepeatingNode(cond, body));
+    }
 
-    // TODO RepeatingNode
+    @RequiredArgsConstructor
+    private static class WhileRepeatingNode extends Node implements RepeatingNode {
 
-    @Specialization
-    public Object exec(VirtualFrame frame, long cond) {
-        if (cond == 0) {
-            return 0L;
+        @Child @NonNull private LamaExpr cond;
+        @Child @NonNull private LamaExpr body;
+
+        @Override
+        public boolean executeRepeating(VirtualFrame frame) {
+            if (!executeCond(frame, cond)) {
+                return false;
+            }
+
+            body.execute(frame);
+            return true;
         }
-
-        body.execute(frame);
-        return execute(frame);
     }
 }

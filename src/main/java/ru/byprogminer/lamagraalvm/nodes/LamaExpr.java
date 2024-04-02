@@ -1,5 +1,6 @@
 package ru.byprogminer.lamagraalvm.nodes;
 
+import com.oracle.truffle.api.CompilerDirectives;
 import com.oracle.truffle.api.dsl.TypeSystemReference;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.Node;
@@ -46,4 +47,13 @@ public abstract class LamaExpr extends Node {
     }
 
     public abstract Object execute(VirtualFrame frame);
+
+    protected static boolean executeCond(VirtualFrame frame, LamaExpr cond) {
+        try {
+            return cond.executeLong(frame) != 0;
+        } catch (UnexpectedResultException e) {
+            CompilerDirectives.transferToInterpreterAndInvalidate();
+            throw new IllegalArgumentException("condition must be integer");
+        }
+    }
 }
