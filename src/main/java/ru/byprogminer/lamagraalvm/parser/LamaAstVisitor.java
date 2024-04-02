@@ -134,7 +134,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitBinaryExpr1(LamaParser.BinaryExpr1Context ctx) {
-        return visitBinaryOperand(ctx.binaryOperand());
+        return visit(ctx.binaryOperand());
     }
 
     @Override
@@ -178,12 +178,18 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     }
 
     @Override
-    public LamaExprFactory visitBinaryOperand(LamaParser.BinaryOperandContext ctx) {
-        if (ctx.getChildCount() > 1) {
-            throw makeException(ctx, "unary minus");
-        }
-
+    public LamaExprFactory visitBinaryOperandPostfix(LamaParser.BinaryOperandPostfixContext ctx) {
         return visit(ctx.postfixExpr());
+    }
+
+    @Override
+    public LamaExprFactory visitBinaryOperandMinus(LamaParser.BinaryOperandMinusContext ctx) {
+        return sort -> {
+            sort.assertVal(ctx);
+
+            final LamaExpr value = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
+            return BinaryOperatorFactory.MinusFactory.create(new Constant(0), value);
+        };
     }
 
     @Override
@@ -303,7 +309,19 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitPrimaryExprList(LamaParser.PrimaryExprListContext ctx) {
-        throw makeException(ctx, "list");
+        return sort -> {
+            sort.assertVal(ctx);
+
+            final List<LamaExpr> values = ctx.expr().stream().map(v -> visitExpr(v).make(LamaExprSort.VAL)).toList();
+
+            LamaExpr result = new Constant(0);
+
+            for (int i = values.size() - 1; i >= 0; --i) {
+                result = new Sexp(LIST_TAG, new LamaExpr[] { values.get(i), result });
+            }
+
+            return result;
+        };
     }
 
     @Override

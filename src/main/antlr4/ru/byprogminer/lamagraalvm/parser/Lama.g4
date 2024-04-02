@@ -43,7 +43,10 @@ binaryExpr
     | <assoc=right> lhs=binaryExpr ':=' rhs=binaryExpr                          #binaryExprAssign
     ;
 
-binaryOperand: '-'? postfixExpr;
+binaryOperand
+    : postfixExpr       #binaryOperandPostfix
+    | '-' postfixExpr   #binaryOperandMinus
+    ;
 
 postfixExpr
     : primaryExpr                                           #postfixExprPrimary
