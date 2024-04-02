@@ -332,7 +332,16 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitPrimaryExprFor(LamaParser.PrimaryExprForContext ctx) {
-        throw new UnsupportedOperationException("for");
+        return sort -> {
+            sort.assertVal();
+
+            final LamaExpr init = visitScopeExpr(ctx.init).make(LamaExprSort.VAL);
+            final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
+            final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
+            final LamaExpr post = visitExpr(ctx.post).make(LamaExprSort.VAL);
+
+            return concat(init, new While(cond, concat(body, post)));
+        };
     }
 
     private static LamaExpr concat(LamaExpr lhs, LamaExpr rhs) {

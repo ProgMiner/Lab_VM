@@ -11,7 +11,7 @@ BLOCK_COMMENT: '(*' (BLOCK_COMMENT | .)*? '*)' -> skip;
 
 UIDENT: [A-Z] W*;
 LIDENT: [a-z] W*;
-DECIMAL: '-'? [0-9]+;
+DECIMAL: [0-9]+;
 STRING: '"' ([^"] | '""')* '"';
 CHAR: '\'' ([^'] | '\'\'' | '\\n' | '\\t' ) '\'';
 
