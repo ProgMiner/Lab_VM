@@ -3,7 +3,9 @@ package ru.byprogminer.lamagraalvm.parser;
 import com.oracle.truffle.api.frame.FrameDescriptor;
 import com.oracle.truffle.api.frame.FrameSlotKind;
 import lombok.RequiredArgsConstructor;
+import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.misc.ParseCancellationException;
 import org.antlr.v4.runtime.tree.TerminalNode;
 import ru.byprogminer.lamagraalvm.LamaLanguage;
 import ru.byprogminer.lamagraalvm.nodes.*;
@@ -22,7 +24,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     private final LamaLanguage language;
 
-    private Scope currentScope = new Scope(null);
+    private Scope currentScope = new Scope();
 
     public LamaAstVisitor(LamaLanguage language, Builtins builtins) {
         this.language = language;
@@ -46,19 +48,26 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitScopeExpr(LamaParser.ScopeExprContext ctx) {
         return sort -> {
-            new PopulateScopeVisitor(currentScope).visitScopeExpr(ctx);
+            final Scope prevScope = currentScope;
+            currentScope = prevScope.createFlatScope();
 
-            LamaExpr result = null;
-            for (final LamaParser.DefinitionContext def : ctx.definition()) {
-                result = concat(result, visit(def).make(null));
+            try {
+                new PopulateScopeVisitor(currentScope).visitScopeExpr(ctx);
+
+                LamaExpr result = null;
+                for (final LamaParser.DefinitionContext def : ctx.definition()) {
+                    result = concat(result, visit(def).make(null));
+                }
+
+                final LamaParser.ExprContext expr = ctx.expr();
+                if (expr != null) {
+                    result = concat(result, visitExpr(expr).make(sort));
+                }
+
+                return ensureNotNull(result);
+            } finally {
+                currentScope = prevScope;
             }
-
-            final LamaParser.ExprContext expr = ctx.expr();
-            if (expr != null) {
-                result = concat(result, visitExpr(expr).make(sort));
-            }
-
-            return ensureNotNull(result);
         };
     }
 
@@ -132,7 +141,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitBinaryExpr2(LamaParser.BinaryExpr2Context ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
 
             final LamaExpr lhs = visit(ctx.lhs).make(LamaExprSort.VAL);
             final LamaExpr rhs = visit(ctx.rhs).make(LamaExprSort.VAL);
@@ -152,11 +161,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 case "&&" -> BinaryOperatorFactory.AndFactory.create(lhs, rhs);
                 case "!!" -> BinaryOperatorFactory.OrFactory.create(lhs, rhs);
                 case ":" -> BinaryOperatorFactory.ConsFactory.create(lhs, rhs);
-                default -> throw ThrowingErrorListener.makeException(
-                        ctx.start.getLine(),
-                        ctx.start.getCharPositionInLine(),
-                        "unknown binary operator " + ctx.op.getText()
-                );
+                default -> throw makeException(ctx, "unknown binary operator " + ctx.op.getText());
             };
         };
     }
@@ -164,7 +169,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitBinaryExprAssign(LamaParser.BinaryExprAssignContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
 
             final LamaExpr lhs = visit(ctx.lhs).make(LamaExprSort.REF);
             final LamaExpr rhs = visit(ctx.rhs).make(LamaExprSort.VAL);
@@ -176,8 +181,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitBinaryOperand(LamaParser.BinaryOperandContext ctx) {
         if (ctx.getChildCount() > 1) {
-            throw ThrowingErrorListener.makeException(ctx.start.getLine(), ctx.start.getCharPositionInLine(),
-                    "unary minus");
+            throw makeException(ctx, "unary minus");
         }
 
         return visit(ctx.postfixExpr());
@@ -191,7 +195,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPostfixExprCall(LamaParser.PostfixExprCallContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
 
             final LamaExpr fun = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
             final LamaExpr[] args = exprListToArray(ctx.expr());
@@ -216,7 +220,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPostfixExprDotCall(LamaParser.PostfixExprDotCallContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
 
             final LamaExpr fun = createName(ctx.LIDENT().getSymbol(), LamaExprSort.VAL);
 
@@ -235,7 +239,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprDecimal(LamaParser.PrimaryExprDecimalContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new Constant(Long.parseLong(ctx.DECIMAL().getText()));
         };
     }
@@ -243,7 +247,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprString(LamaParser.PrimaryExprStringContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new StringLiteral(convertStringLiteral(ctx.STRING().getText()));
         };
     }
@@ -251,7 +255,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprChar(LamaParser.PrimaryExprCharContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new Constant(decodeCharLiteral(ctx.CHAR().getSymbol()));
         };
     }
@@ -264,7 +268,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprTrue(LamaParser.PrimaryExprTrueContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new Constant(1);
         };
     }
@@ -272,7 +276,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprFalse(LamaParser.PrimaryExprFalseContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new Constant(0);
         };
     }
@@ -280,7 +284,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprFun(LamaParser.PrimaryExprFunContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return createFun(ctx.funArgs(), ctx.scopeExpr(), null);
         };
     }
@@ -288,7 +292,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprSkip(LamaParser.PrimaryExprSkipContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new Constant(0);
         };
     }
@@ -300,13 +304,13 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     @Override
     public LamaExprFactory visitPrimaryExprList(LamaParser.PrimaryExprListContext ctx) {
-        throw ThrowingErrorListener.makeException(ctx.start.getLine(), ctx.start.getCharPositionInLine(), "list");
+        throw makeException(ctx, "list");
     }
 
     @Override
     public LamaExprFactory visitPrimaryExprArray(LamaParser.PrimaryExprArrayContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new Array(exprListToArray(ctx.expr()));
         };
     }
@@ -314,7 +318,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprSexp(LamaParser.PrimaryExprSexpContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
             return new Sexp(ctx.UIDENT().getText(), exprListToArray(ctx.expr()));
         };
     }
@@ -332,13 +336,13 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 final LamaExpr cond = visitExpr(conds.get(i)).make(LamaExprSort.VAL);
                 final LamaExpr then = visitScopeExpr(thens.get(i)).make(sort);
 
-                branches.add(new LamaExpr[]{ cond, then });
+                branches.add(new LamaExpr[] { cond, then });
             }
 
             LamaExpr result;
 
             if (ctx.else_ == null) {
-                sort.assertVal(ctx.start);
+                sort.assertVal(ctx);
                 result = new Constant(0);
             } else {
                 result = visitScopeExpr(ctx.else_).make(sort);
@@ -357,7 +361,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprWhile(LamaParser.PrimaryExprWhileContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
 
             final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
             final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
@@ -369,7 +373,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprDo(LamaParser.PrimaryExprDoContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
 
             final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
             final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
@@ -381,7 +385,9 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     @Override
     public LamaExprFactory visitPrimaryExprFor(LamaParser.PrimaryExprForContext ctx) {
         return sort -> {
-            sort.assertVal(ctx.start);
+            sort.assertVal(ctx);
+
+            // TODO fix scopes
 
             final LamaExpr init = visitScopeExpr(ctx.init).make(LamaExprSort.VAL);
             final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
@@ -402,14 +408,22 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final Case.Matcher[] matchers = new Case.Matcher[branchCtx.size()];
             final LamaExpr[] bodies = new LamaExpr[branchCtx.size()];
 
+            final Scope prevScope = currentScope;
+
             for (int i = 0; i < branchCtx.size(); i++) {
-                final LamaParser.CaseBranchContext br = branchCtx.get(i);
-                final LamaParser.PatternContext p = br.pattern();
+                currentScope = prevScope.createFlatScope();
 
-                new PopulateScopeVisitor(currentScope).visit(p);
+                try {
+                    final LamaParser.CaseBranchContext br = branchCtx.get(i);
+                    final LamaParser.PatternContext p = br.pattern();
 
-                matchers[i] = new MatcherVisitor(currentScope).visit(p);
-                bodies[i] = visitScopeExpr(br.scopeExpr()).make(sort);
+                    new PopulateScopeVisitor(currentScope).visit(p);
+
+                    matchers[i] = new MatcherVisitor(currentScope).visit(p);
+                    bodies[i] = visitScopeExpr(br.scopeExpr()).make(sort);
+                } finally {
+                    currentScope = prevScope;
+                }
             }
 
             return new Case(value, matchers, bodies);
@@ -430,7 +444,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     private LamaExpr createFun(LamaParser.FunArgsContext argsCtx, LamaParser.ScopeExprContext bodyCtx, String name) {
         final Scope scope = currentScope;
 
-        final Scope funScope = new Scope(scope);
+        final Scope funScope = scope.createScope();
         currentScope = funScope;
 
         try {
@@ -509,11 +523,18 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         }
 
         if (str.length() > 1) {
-            throw ThrowingErrorListener.makeException(token.getLine(), token.getCharPositionInLine(),
-                    "illegal char literal");
+            throw makeException(token, "illegal char literal");
         }
 
         return str.charAt(0);
+    }
+
+    private static ParseCancellationException makeException(ParserRuleContext ctx, String msg) {
+        return makeException(ctx.start, msg);
+    }
+
+    private static ParseCancellationException makeException(Token start, String msg) {
+        return ThrowingErrorListener.makeException(start.getLine(), start.getCharPositionInLine(), msg);
     }
 
     public enum LamaExprSort {
@@ -521,14 +542,13 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         VAL {
 
             @Override
-            void assertVal(Token start) {}
+            void assertVal(ParserRuleContext ctx) {}
         },
 
         REF;
 
-        void assertVal(Token start) {
-            throw ThrowingErrorListener.makeException(start.getLine(), start.getCharPositionInLine(),
-                    "expected expression of sort Val");
+        void assertVal(ParserRuleContext ctx) {
+            throw makeException(ctx, "expected expression of sort Val");
         }
     }
 
@@ -538,39 +558,51 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         LamaExpr make(LamaExprSort sort);
     }
 
-    @RequiredArgsConstructor
     private static class Scope {
 
         private final Scope parent;
 
+        private final int frameDepth;
+
         private final Map<String, Integer> slots = new HashMap<>();
 
-        final FrameDescriptor.Builder frameDescriptorBuilder = FrameDescriptor.newBuilder()
-                .defaultValue(0L);
+        private final FrameDescriptor.Builder frameDescriptorBuilder;
 
-        private void createSlot(Token id) {
+        public Scope() {
+            this(null);
+        }
+
+        private Scope(Scope parent) {
+            this(parent, 1, FrameDescriptor.newBuilder().defaultValue(0L));
+        }
+
+        private Scope(Scope parent, int frameDepth, FrameDescriptor.Builder frameDescriptorBuilder) {
+            this.parent = parent;
+            this.frameDepth = frameDepth;
+            this.frameDescriptorBuilder = Objects.requireNonNull(frameDescriptorBuilder);
+        }
+
+        public void createSlot(Token id) {
             final String name = id.getText();
 
             final int idx = frameDescriptorBuilder.addSlot(FrameSlotKind.Illegal, name, null);
 
             if (slots.put(name, idx) != null) {
-                throw ThrowingErrorListener.makeException(id.getLine(), id.getCharPositionInLine(),
-                        "id \"" + name + "\" is already defined in scope");
+                throw makeException(id, "id \"" + name + "\" is already defined in scope");
             }
         }
 
-        private int getSlot(Token id) {
+        public int getSlot(Token id) {
             final Integer result = slots.get(id.getText());
 
             if (result == null) {
-                throw ThrowingErrorListener.makeException(id.getLine(), id.getCharPositionInLine(),
-                        "id \"" + id.getText() + "\" is not defined");
+                throw makeException(id, "id \"" + id.getText() + "\" is not defined");
             }
 
             return result;
         }
 
-        private int getSlotRec(Token id, int[] depth) {
+        public int getSlotRec(Token id, int[] depth) {
             for (Scope scope = this; scope != null; scope = scope.parent) {
                 final Integer result = scope.slots.get(id.getText());
 
@@ -578,15 +610,22 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                     return result;
                 }
 
-                ++depth[0];
+                depth[0] += scope.frameDepth;
             }
 
-            throw ThrowingErrorListener.makeException(id.getLine(), id.getCharPositionInLine(),
-                    "id \"" + id.getText() + "\" is not defined");
+            throw makeException(id, "id \"" + id.getText() + "\" is not defined");
         }
 
-        private FrameDescriptor createFrameDescriptor() {
+        public FrameDescriptor createFrameDescriptor() {
             return frameDescriptorBuilder.build();
+        }
+
+        public Scope createScope() {
+            return new Scope(this);
+        }
+
+        public Scope createFlatScope() {
+            return new Scope(this, 0, this.frameDescriptorBuilder);
         }
     }
 
@@ -642,8 +681,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                     return visit(tailSimple.simplePattern());
                 }
 
-                throw ThrowingErrorListener.makeException(ctx.start.getLine(), ctx.start.getCharPositionInLine(),
-                        "unknown type of pattern");
+                throw makeException(ctx, "unknown type of pattern");
             }
         }
 
