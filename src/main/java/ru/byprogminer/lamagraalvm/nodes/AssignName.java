@@ -8,7 +8,7 @@ import com.oracle.truffle.api.nodes.NodeInfo;
 
 @NodeField(name = "slot", type = int.class)
 @NodeChild(value = "value", type = LamaExpr.class)
-@NodeInfo(shortName = ":=", description = "assignment in variable")
+@NodeInfo(shortName = "=", description = "assignment in variable")
 public abstract class AssignName extends LamaExpr {
 
     @Specialization

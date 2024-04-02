@@ -40,7 +40,7 @@ binaryExpr
     | lhs=binaryExpr op='&&' rhs=binaryExpr                                     #binaryExpr2
     | lhs=binaryExpr op='!!' rhs=binaryExpr                                     #binaryExpr2
     | <assoc=right> lhs=binaryExpr op=':' rhs=binaryExpr                        #binaryExpr2
-    | <assoc=right> lhs=binaryExpr op=':=' rhs=binaryExpr                       #binaryExpr2
+    | <assoc=right> lhs=binaryExpr ':=' rhs=binaryExpr                          #binaryExprAssign
     ;
 
 binaryOperand: '-'? postfixExpr;

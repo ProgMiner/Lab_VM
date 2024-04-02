@@ -10,6 +10,7 @@ import ru.byprogminer.lamagraalvm.LamaTypes;
 import ru.byprogminer.lamagraalvm.LamaTypesGen;
 import ru.byprogminer.lamagraalvm.runtime.LamaArray;
 import ru.byprogminer.lamagraalvm.runtime.LamaFun;
+import ru.byprogminer.lamagraalvm.runtime.LamaRef;
 import ru.byprogminer.lamagraalvm.runtime.LamaSexp;
 
 @NodeInfo(
@@ -22,6 +23,10 @@ public abstract class LamaExpr extends Node {
 
     public long executeLong(VirtualFrame frame) throws UnexpectedResultException {
         return LamaTypesGen.expectLong(this.execute(frame));
+    }
+
+    public LamaRef executeRef(VirtualFrame frame) throws UnexpectedResultException {
+        return LamaTypesGen.expectLamaRef(this.execute(frame));
     }
 
     public String executeString(VirtualFrame frame) throws UnexpectedResultException {

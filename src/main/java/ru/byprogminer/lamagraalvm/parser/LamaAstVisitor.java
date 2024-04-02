@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 @RequiredArgsConstructor
-public class LamaAstVisitor extends LamaBaseVisitor<LamaExpr> {
+public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFactory> {
 
     private Scope currentScope = new Scope(null);
 
@@ -29,101 +29,131 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaExpr> {
     }
 
     @Override
-    public LamaExpr visitProgram(LamaParser.ProgramContext ctx) {
+    public LamaExprFactory visitProgram(LamaParser.ProgramContext ctx) {
         return visitScopeExpr(ctx.scopeExpr());
     }
 
     @Override
-    public LamaExpr visitScopeExpr(LamaParser.ScopeExprContext ctx) {
-        new PopulateScopeVisitor(currentScope).visitScopeExpr(ctx);
+    public LamaExprFactory visitScopeExpr(LamaParser.ScopeExprContext ctx) {
+        return sort -> {
+            new PopulateScopeVisitor(currentScope).visitScopeExpr(ctx);
 
-        LamaExpr result = null;
-        for (final LamaParser.DefinitionContext def : ctx.definition()) {
-            result = concat(result, visit(def));
-        }
+            LamaExpr result = null;
+            for (final LamaParser.DefinitionContext def : ctx.definition()) {
+                result = concat(result, visit(def).make(null));
+            }
 
-        final LamaParser.ExprContext expr = ctx.expr();
-        if (expr != null) {
-            result = concat(result, visitExpr(expr));
-        }
+            final LamaParser.ExprContext expr = ctx.expr();
+            if (expr != null) {
+                result = concat(result, visitExpr(expr).make(sort));
+            }
 
-        return ensureNotNull(result);
-    }
-
-    @Override
-    public LamaExpr visitVarDef(LamaParser.VarDefContext ctx) {
-        LamaExpr result = null;
-
-        for (final LamaParser.VarDefItemContext item : ctx.varDefItem()) {
-            result = concat(result, visitVarDefItem(item));
-        }
-
-        return result;
-    }
-
-    @Override
-    public LamaExpr visitFunDef(LamaParser.FunDefContext ctx) {
-        throw new UnsupportedOperationException("fun def");
-    }
-
-    @Override
-    public LamaExpr visitVarDefItem(LamaParser.VarDefItemContext ctx) {
-        final LamaParser.BasicExprContext value = ctx.basicExpr();
-
-        if (value == null) {
-            return null;
-        }
-
-        return AssignNameNodeGen.create(visitBasicExpr(value), currentScope.getSlot(ctx.LIDENT().getSymbol()));
-    }
-
-    @Override
-    public LamaExpr visitExpr(LamaParser.ExprContext ctx) {
-        LamaExpr result = null;
-
-        for (final LamaParser.BasicExprContext expr : ctx.basicExpr()) {
-            result = concat(result, visitBasicExpr(expr));
-        }
-
-        return result;
-    }
-
-    @Override
-    public LamaExpr visitBasicExpr(LamaParser.BasicExprContext ctx) {
-        return visit(ctx.binaryExpr());
-    }
-
-    @Override
-    public LamaExpr visitBinaryExpr1(LamaParser.BinaryExpr1Context ctx) {
-        return visitBinaryOperand(ctx.binaryOperand());
-    }
-
-    @Override
-    public LamaExpr visitBinaryExpr2(LamaParser.BinaryExpr2Context ctx) {
-        final LamaExpr lhs = visit(ctx.lhs);
-        final LamaExpr rhs = visit(ctx.rhs);
-
-        return switch (ctx.op.getText()) {
-            case "*" -> BinaryOperatorFactory.MultiplyFactory.create(lhs, rhs);
-            case "/" -> BinaryOperatorFactory.DivideFactory.create(lhs, rhs);
-            case "%" -> BinaryOperatorFactory.RemainderFactory.create(lhs, rhs);
-            case "+" -> BinaryOperatorFactory.PlusFactory.create(lhs, rhs);
-            case "-" -> BinaryOperatorFactory.MinusFactory.create(lhs, rhs);
-            case "==" -> BinaryOperatorFactory.EqualsFactory.create(lhs, rhs);
-            case "!=" -> BinaryOperatorFactory.NotEqualsFactory.create(lhs, rhs);
-            case "<" -> BinaryOperatorFactory.LessFactory.create(lhs, rhs);
-            case "<=" -> BinaryOperatorFactory.LessOrEqualFactory.create(lhs, rhs);
-            case ">" -> BinaryOperatorFactory.GreaterFactory.create(lhs, rhs);
-            case ">=" -> BinaryOperatorFactory.GreaterOrEqualFactory.create(lhs, rhs);
-            case "&&" -> BinaryOperatorFactory.AndFactory.create(lhs, rhs);
-            case "!!" -> BinaryOperatorFactory.OrFactory.create(lhs, rhs);
-            case ":" -> BinaryOperatorFactory.ConsFactory.create(lhs, rhs);
-            default -> throw new UnsupportedOperationException("binary " + ctx.op);
+            return ensureNotNull(result);
         };
     }
 
     @Override
-    public LamaExpr visitBinaryOperand(LamaParser.BinaryOperandContext ctx) {
+    public LamaExprFactory visitVarDef(LamaParser.VarDefContext ctx) {
+        return sort -> {
+            LamaExpr result = null;
+
+            for (final LamaParser.VarDefItemContext item : ctx.varDefItem()) {
+                result = concat(result, visitVarDefItem(item).make(null));
+            }
+
+            return result;
+        };
+    }
+
+    @Override
+    public LamaExprFactory visitFunDef(LamaParser.FunDefContext ctx) {
+        throw new UnsupportedOperationException("fun def");
+    }
+
+    @Override
+    public LamaExprFactory visitVarDefItem(LamaParser.VarDefItemContext ctx) {
+        return sort -> {
+            final LamaParser.BasicExprContext value = ctx.basicExpr();
+
+            if (value == null) {
+                return null;
+            }
+
+            return AssignNameNodeGen.create(
+                    visitBasicExpr(value).make(LamaExprSort.VAL),
+                    currentScope.getSlot(ctx.LIDENT().getSymbol())
+            );
+        };
+    }
+
+    @Override
+    public LamaExprFactory visitExpr(LamaParser.ExprContext ctx) {
+        return sort -> {
+            LamaExpr result = null;
+
+            final List<LamaParser.BasicExprContext> basicExpr = ctx.basicExpr();
+            for (int i = 0, basicExprSize = basicExpr.size(); i < basicExprSize; i++) {
+                final LamaExprFactory f = visitBasicExpr(basicExpr.get(i));
+
+                result = concat(result, i == basicExprSize - 1 ? f.make(sort) : f.make(LamaExprSort.VAL));
+            }
+
+            return result;
+        };
+    }
+
+    @Override
+    public LamaExprFactory visitBasicExpr(LamaParser.BasicExprContext ctx) {
+        return visit(ctx.binaryExpr());
+    }
+
+    @Override
+    public LamaExprFactory visitBinaryExpr1(LamaParser.BinaryExpr1Context ctx) {
+        return visitBinaryOperand(ctx.binaryOperand());
+    }
+
+    @Override
+    public LamaExprFactory visitBinaryExpr2(LamaParser.BinaryExpr2Context ctx) {
+        return sort -> {
+            sort.assertVal();
+
+            final LamaExpr lhs = visit(ctx.lhs).make(LamaExprSort.VAL);
+            final LamaExpr rhs = visit(ctx.rhs).make(LamaExprSort.VAL);
+
+            return switch (ctx.op.getText()) {
+                case "*" -> BinaryOperatorFactory.MultiplyFactory.create(lhs, rhs);
+                case "/" -> BinaryOperatorFactory.DivideFactory.create(lhs, rhs);
+                case "%" -> BinaryOperatorFactory.RemainderFactory.create(lhs, rhs);
+                case "+" -> BinaryOperatorFactory.PlusFactory.create(lhs, rhs);
+                case "-" -> BinaryOperatorFactory.MinusFactory.create(lhs, rhs);
+                case "==" -> BinaryOperatorFactory.EqualsFactory.create(lhs, rhs);
+                case "!=" -> BinaryOperatorFactory.NotEqualsFactory.create(lhs, rhs);
+                case "<" -> BinaryOperatorFactory.LessFactory.create(lhs, rhs);
+                case "<=" -> BinaryOperatorFactory.LessOrEqualFactory.create(lhs, rhs);
+                case ">" -> BinaryOperatorFactory.GreaterFactory.create(lhs, rhs);
+                case ">=" -> BinaryOperatorFactory.GreaterOrEqualFactory.create(lhs, rhs);
+                case "&&" -> BinaryOperatorFactory.AndFactory.create(lhs, rhs);
+                case "!!" -> BinaryOperatorFactory.OrFactory.create(lhs, rhs);
+                case ":" -> BinaryOperatorFactory.ConsFactory.create(lhs, rhs);
+                default -> throw new UnsupportedOperationException("binary " + ctx.op);
+            };
+        };
+    }
+
+    @Override
+    public LamaExprFactory visitBinaryExprAssign(LamaParser.BinaryExprAssignContext ctx) {
+        return sort -> {
+            sort.assertVal();
+
+            final LamaExpr lhs = visit(ctx.lhs).make(LamaExprSort.REF);
+            final LamaExpr rhs = visit(ctx.rhs).make(LamaExprSort.VAL);
+
+            return AssignNodeGen.create(lhs, rhs);
+        };
+    }
+
+    @Override
+    public LamaExprFactory visitBinaryOperand(LamaParser.BinaryOperandContext ctx) {
         if (ctx.getChildCount() > 1) {
             throw new UnsupportedOperationException("unary minus");
         }
@@ -132,106 +162,131 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaExpr> {
     }
 
     @Override
-    public LamaExpr visitPostfixExprPrimary(LamaParser.PostfixExprPrimaryContext ctx) {
+    public LamaExprFactory visitPostfixExprPrimary(LamaParser.PostfixExprPrimaryContext ctx) {
         return visit(ctx.primaryExpr());
     }
 
     @Override
-    public LamaExpr visitPostfixExprCall(LamaParser.PostfixExprCallContext ctx) {
-        final LamaExpr fun = visit(ctx.postfixExpr());
+    public LamaExprFactory visitPostfixExprCall(LamaParser.PostfixExprCallContext ctx) {
+        return sort -> {
+            sort.assertVal();
 
-        final List<LamaParser.ExprContext> argsCtx = ctx.expr();
-        final LamaExpr[] args = new LamaExpr[argsCtx.size()];
+            final LamaExpr fun = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
 
-        for (int i = 0; i < args.length; ++i) {
-            args[i] = visitExpr(argsCtx.get(i));
-        }
+            final List<LamaParser.ExprContext> argsCtx = ctx.expr();
+            final LamaExpr[] args = new LamaExpr[argsCtx.size()];
 
-        return new Call(fun, args);
+            for (int i = 0; i < args.length; ++i) {
+                args[i] = visitExpr(argsCtx.get(i)).make(LamaExprSort.VAL);
+            }
+
+            return new Call(fun, args);
+        };
     }
 
     @Override
-    public LamaExpr visitPostfixExprSubscript(LamaParser.PostfixExprSubscriptContext ctx) {
+    public LamaExprFactory visitPostfixExprSubscript(LamaParser.PostfixExprSubscriptContext ctx) {
         throw new UnsupportedOperationException("subscript");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprDecimal(LamaParser.PrimaryExprDecimalContext ctx) {
-        return new Constant(Long.parseLong(ctx.DECIMAL().getText()));
+    public LamaExprFactory visitPrimaryExprDecimal(LamaParser.PrimaryExprDecimalContext ctx) {
+        return sort -> {
+            sort.assertVal();
+            return new Constant(Long.parseLong(ctx.DECIMAL().getText()));
+        };
     }
 
     @Override
-    public LamaExpr visitPrimaryExprString(LamaParser.PrimaryExprStringContext ctx) {
+    public LamaExprFactory visitPrimaryExprString(LamaParser.PrimaryExprStringContext ctx) {
         throw new UnsupportedOperationException("string");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprChar(LamaParser.PrimaryExprCharContext ctx) {
+    public LamaExprFactory visitPrimaryExprChar(LamaParser.PrimaryExprCharContext ctx) {
         throw new UnsupportedOperationException("char");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprId(LamaParser.PrimaryExprIdContext ctx) {
-        return NameNodeGen.create(currentScope.getSlot(ctx.LIDENT().getSymbol()));
+    public LamaExprFactory visitPrimaryExprId(LamaParser.PrimaryExprIdContext ctx) {
+        return sort -> {
+            final int slot = currentScope.getSlot(ctx.LIDENT().getSymbol());
+
+            // TODO nested scopes
+
+            return switch (sort) {
+                case VAL -> NameNodeGen.create(slot);
+                case REF -> NameRefNodeGen.create(slot);
+            };
+        };
     }
 
     @Override
-    public LamaExpr visitPrimaryExprTrue(LamaParser.PrimaryExprTrueContext ctx) {
-        return new Constant(1);
+    public LamaExprFactory visitPrimaryExprTrue(LamaParser.PrimaryExprTrueContext ctx) {
+        return sort -> {
+            sort.assertVal();
+            return new Constant(1);
+        };
     }
 
     @Override
-    public LamaExpr visitPrimaryExprFalse(LamaParser.PrimaryExprFalseContext ctx) {
-        return new Constant(0);
+    public LamaExprFactory visitPrimaryExprFalse(LamaParser.PrimaryExprFalseContext ctx) {
+        return sort -> {
+            sort.assertVal();
+            return new Constant(0);
+        };
     }
 
     @Override
-    public LamaExpr visitPrimaryExprFun(LamaParser.PrimaryExprFunContext ctx) {
+    public LamaExprFactory visitPrimaryExprFun(LamaParser.PrimaryExprFunContext ctx) {
         throw new UnsupportedOperationException("fun value");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprSkip(LamaParser.PrimaryExprSkipContext ctx) {
-        return new Constant(0);
+    public LamaExprFactory visitPrimaryExprSkip(LamaParser.PrimaryExprSkipContext ctx) {
+        return sort -> {
+            sort.assertVal();
+            return new Constant(0);
+        };
     }
 
     @Override
-    public LamaExpr visitPrimaryExprScope(LamaParser.PrimaryExprScopeContext ctx) {
+    public LamaExprFactory visitPrimaryExprScope(LamaParser.PrimaryExprScopeContext ctx) {
         return visitScopeExpr(ctx.scopeExpr());
     }
 
     @Override
-    public LamaExpr visitPrimaryExprList(LamaParser.PrimaryExprListContext ctx) {
+    public LamaExprFactory visitPrimaryExprList(LamaParser.PrimaryExprListContext ctx) {
         throw new UnsupportedOperationException("list");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprArray(LamaParser.PrimaryExprArrayContext ctx) {
+    public LamaExprFactory visitPrimaryExprArray(LamaParser.PrimaryExprArrayContext ctx) {
         throw new UnsupportedOperationException("array");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprSexp(LamaParser.PrimaryExprSexpContext ctx) {
+    public LamaExprFactory visitPrimaryExprSexp(LamaParser.PrimaryExprSexpContext ctx) {
         throw new UnsupportedOperationException("sexp");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprIf(LamaParser.PrimaryExprIfContext ctx) {
+    public LamaExprFactory visitPrimaryExprIf(LamaParser.PrimaryExprIfContext ctx) {
         throw new UnsupportedOperationException("if");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprWhile(LamaParser.PrimaryExprWhileContext ctx) {
+    public LamaExprFactory visitPrimaryExprWhile(LamaParser.PrimaryExprWhileContext ctx) {
         throw new UnsupportedOperationException("while");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprDo(LamaParser.PrimaryExprDoContext ctx) {
+    public LamaExprFactory visitPrimaryExprDo(LamaParser.PrimaryExprDoContext ctx) {
         throw new UnsupportedOperationException("do");
     }
 
     @Override
-    public LamaExpr visitPrimaryExprFor(LamaParser.PrimaryExprForContext ctx) {
+    public LamaExprFactory visitPrimaryExprFor(LamaParser.PrimaryExprForContext ctx) {
         throw new UnsupportedOperationException("for");
     }
 
@@ -257,6 +312,27 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaExpr> {
         }
 
         return expr;
+    }
+
+    public enum LamaExprSort {
+
+        VAL,
+
+        REF {
+
+            @Override
+            void assertVal() {
+                throw new IllegalArgumentException("cannot produce expression of sort REF");
+            }
+        };
+
+        void assertVal() {}
+    }
+
+    @FunctionalInterface
+    public interface LamaExprFactory {
+
+        LamaExpr make(LamaExprSort sort);
     }
 
     @RequiredArgsConstructor
