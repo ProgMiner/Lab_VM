@@ -26,8 +26,11 @@ run_tests() {
 
 set -e
 
-# TODO fix closures, add infix declaration
+# TODO: fix closures - test094, test096
+#       add eta - test105
+#       add infix declarations - test092, test095, test098
+#       add patterns in function declaration - test106
 
-run_tests '' 'test092 test094 test095 test096 test098'
+run_tests '' 'test092 test094 test095 test096 test098 test105 test106 test111'
 run_tests expressions
 run_tests deep-expressions

@@ -52,7 +52,9 @@ public class LamaLanguage extends TruffleLanguage<LamaContext> {
 
     @Override
     protected CallTarget parse(ParsingRequest request) {
-        final LamaLexer lexer = new LamaLexer(sourceToCharStream(request.getSource()));
+        final Source src = request.getSource();
+
+        final LamaLexer lexer = new LamaLexer(sourceToCharStream(src));
         lexer.removeErrorListeners();
         lexer.addErrorListener(ThrowingErrorListener.INSTANCE);
 
@@ -64,10 +66,11 @@ public class LamaLanguage extends TruffleLanguage<LamaContext> {
 
         final Builtins builtins = new Builtins(this, context.getOut(), context.getIn());
 
-        final LamaAstVisitor visitor = new LamaAstVisitor(this, builtins);
+        final LamaAstVisitor visitor = new LamaAstVisitor(this, src, builtins);
         final LamaExpr expr = visitor.visitProgram(exprCtx).make(LamaAstVisitor.LamaExprSort.VAL);
 
         final LamaRootNode root = new MainRootNode(this, visitor.createFrameDescriptor(), expr, builtins);
+        root.setSourceSection(src.createSection(0, src.getLength()));
         return root.getCallTarget();
     }
 

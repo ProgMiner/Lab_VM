@@ -28,7 +28,7 @@ public abstract class SubscriptRef extends LamaExpr {
             @Override
             public void assignObject(VirtualFrame frame, Object value) {
                 if (!(value instanceof Long)) {
-                    throw new UnsupportedOperationException("unable to assign object to string index");
+                    throw exn(new UnsupportedOperationException("unable to assign object to string index"));
                 }
 
                 assignLong(frame, (long) value);

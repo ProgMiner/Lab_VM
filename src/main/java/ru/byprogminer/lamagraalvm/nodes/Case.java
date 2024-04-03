@@ -6,6 +6,7 @@ import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.NodeInfo;
 import lombok.NonNull;
 import lombok.RequiredArgsConstructor;
+import ru.byprogminer.lamagraalvm.nodes.builtin.StringBuiltin;
 import ru.byprogminer.lamagraalvm.runtime.LamaArray;
 import ru.byprogminer.lamagraalvm.runtime.LamaSexp;
 import ru.byprogminer.lamagraalvm.runtime.LamaString;
@@ -17,6 +18,8 @@ import java.util.Objects;
 @RequiredArgsConstructor
 @NodeInfo(shortName = "case", description = "case-of expression")
 public class Case extends LamaExpr {
+
+    private final int line, column;
 
     @Child @NonNull private LamaExpr value;
 
@@ -34,7 +37,11 @@ public class Case extends LamaExpr {
         }
 
         CompilerDirectives.transferToInterpreterAndInvalidate();
-        throw new IllegalArgumentException("match failure"); // TODO verbose message
+
+        final StringBuilder valueStr = new StringBuilder();
+        StringBuiltin.string(value, valueStr);
+
+        throw exn(new IllegalArgumentException("match failure at " + line + ":" + column + ", value: " + valueStr));
     }
 
     public interface Matcher {

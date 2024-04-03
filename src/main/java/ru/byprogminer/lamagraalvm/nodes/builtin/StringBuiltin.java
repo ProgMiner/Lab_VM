@@ -5,6 +5,7 @@ import com.oracle.truffle.api.dsl.GenerateNodeFactory;
 import com.oracle.truffle.api.dsl.Specialization;
 import com.oracle.truffle.api.frame.MaterializedFrame;
 import com.oracle.truffle.api.nodes.NodeInfo;
+import ru.byprogminer.lamagraalvm.LamaLanguage;
 import ru.byprogminer.lamagraalvm.runtime.LamaArray;
 import ru.byprogminer.lamagraalvm.runtime.LamaFun;
 import ru.byprogminer.lamagraalvm.runtime.LamaSexp;
@@ -85,7 +86,8 @@ public abstract class StringBuiltin extends Builtin {
         }
 
         CompilerDirectives.transferToInterpreterAndInvalidate();
-        throw new IllegalArgumentException("value of type " + value.getClass() + " is not LaMa value");
+        throw new IllegalArgumentException("value of type " + value.getClass()
+                + " is not a " + LamaLanguage.NAME + " value");
     }
 
     public static void string(long value, StringBuilder builder) {

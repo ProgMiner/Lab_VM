@@ -27,7 +27,7 @@ public abstract class ReadBuiltin extends Builtin {
         final String line = in.readLine();
 
         if (line == null) {
-            throw new EOFException();
+            throw exn(new EOFException());
         }
 
         return Long.parseLong(line);

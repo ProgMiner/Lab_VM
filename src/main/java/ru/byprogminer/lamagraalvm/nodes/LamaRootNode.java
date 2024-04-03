@@ -5,7 +5,10 @@ import com.oracle.truffle.api.frame.FrameDescriptor;
 import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.NodeInfo;
 import com.oracle.truffle.api.nodes.RootNode;
+import com.oracle.truffle.api.source.SourceSection;
+import lombok.Setter;
 import ru.byprogminer.lamagraalvm.LamaLanguage;
+import ru.byprogminer.lamagraalvm.runtime.LamaException;
 
 import java.util.Objects;
 
@@ -16,6 +19,9 @@ public class LamaRootNode extends RootNode {
 
     private final int arguments;
 
+    @Setter
+    private SourceSection sourceSection;
+
     public LamaRootNode(LamaLanguage language, FrameDescriptor frameDescriptor, LamaExpr expr, int arguments) {
         super(language, frameDescriptor);
 
@@ -24,13 +30,18 @@ public class LamaRootNode extends RootNode {
     }
 
     @Override
+    public SourceSection getSourceSection() {
+        return sourceSection;
+    }
+
+    @Override
     public Object execute(VirtualFrame frame) {
         final Object[] args = frame.getArguments();
 
         if (args.length < arguments) {
             CompilerDirectives.transferToInterpreterAndInvalidate();
-            throw new IllegalArgumentException("not enough arguments (expected " + arguments
-                    + ", passed " + args.length + ")");
+            throw exn(new IllegalArgumentException("not enough arguments (expected " + arguments
+                    + ", passed " + args.length + ")"));
         }
 
         for (int i = 0; i < arguments; ++i) {
@@ -38,5 +49,9 @@ public class LamaRootNode extends RootNode {
         }
 
         return expr.execute(frame);
+    }
+
+    protected LamaException exn(Throwable cause) {
+        return new LamaException(cause, this);
     }
 }

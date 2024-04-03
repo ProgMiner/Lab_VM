@@ -2,6 +2,8 @@ package ru.byprogminer.lamagraalvm.parser;
 
 import com.oracle.truffle.api.frame.FrameDescriptor;
 import com.oracle.truffle.api.frame.FrameSlotKind;
+import com.oracle.truffle.api.source.Source;
+import com.oracle.truffle.api.source.SourceSection;
 import lombok.RequiredArgsConstructor;
 import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.Token;
@@ -24,10 +26,13 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
     private final LamaLanguage language;
 
+    private final Source source;
+
     private Scope currentScope = new Scope();
 
-    public LamaAstVisitor(LamaLanguage language, Builtins builtins) {
+    public LamaAstVisitor(LamaLanguage language, Source source, Builtins builtins) {
         this.language = language;
+        this.source = source;
 
         builtins.initBuiltins(currentScope.frameDescriptorBuilder);
 
@@ -51,7 +56,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final LamaParser.ExprContext expr = ctx.expr();
 
             if (expr != null) {
-                result = concat(result, visitExpr(expr).make(sort));
+                result = dbg(ctx, concat(result, visitExpr(expr).make(sort)));
             }
 
             return ensureNotNull(result);
@@ -64,7 +69,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             LamaExpr result = null;
 
             for (final LamaParser.VarDefItemContext item : ctx.varDefItem()) {
-                result = concat(result, visitVarDefItem(item).make(null));
+                result = dbg(ctx, concat(result, visitVarDefItem(item).make(null)));
             }
 
             return result;
@@ -76,10 +81,10 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         return sort -> {
             final Token name = ctx.LIDENT().getSymbol();
 
-            return AssignNameNodeGen.create(
-                    createFun(ctx.funArgs(), ctx.scopeExpr(), name.getText()),
+            return dbg(ctx, AssignNameNodeGen.create(
+                    dbg(ctx, createFun(ctx.funArgs(), ctx.scopeExpr(), name.getText())),
                     currentScope.getSlot(name)
-            );
+            ));
         };
     }
 
@@ -92,10 +97,10 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 return null;
             }
 
-            return AssignNameNodeGen.create(
+            return dbg(ctx, AssignNameNodeGen.create(
                     visitBasicExpr(value).make(LamaExprSort.VAL),
                     currentScope.getSlot(ctx.LIDENT().getSymbol())
-            );
+            ));
         };
     }
 
@@ -108,7 +113,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             for (int i = 0, basicExprSize = basicExpr.size(); i < basicExprSize; i++) {
                 final LamaExprFactory f = visitBasicExpr(basicExpr.get(i));
 
-                result = concat(result, i == basicExprSize - 1 ? f.make(sort) : f.make(LamaExprSort.VAL));
+                result = dbg(ctx, concat(result, i == basicExprSize - 1 ? f.make(sort) : f.make(LamaExprSort.VAL)));
             }
 
             return result;
@@ -133,7 +138,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final LamaExpr lhs = visit(ctx.lhs).make(LamaExprSort.VAL);
             final LamaExpr rhs = visit(ctx.rhs).make(LamaExprSort.VAL);
 
-            return switch (ctx.op.getText()) {
+            final LamaExpr result = switch (ctx.op.getText()) {
                 case "*" -> BinaryOperatorFactory.MultiplyFactory.create(lhs, rhs);
                 case "/" -> BinaryOperatorFactory.DivideFactory.create(lhs, rhs);
                 case "%" -> BinaryOperatorFactory.RemainderFactory.create(lhs, rhs);
@@ -150,6 +155,8 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 case ":" -> new Sexp(LIST_TAG, new LamaExpr[] { lhs, rhs });
                 default -> throw makeException(ctx, "unknown binary operator " + ctx.op.getText());
             };
+
+            return dbg(ctx, result);
         };
     }
 
@@ -161,7 +168,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final LamaExpr lhs = visit(ctx.lhs).make(LamaExprSort.REF);
             final LamaExpr rhs = visit(ctx.rhs).make(LamaExprSort.VAL);
 
-            return AssignNodeGen.create(lhs, rhs);
+            return dbg(ctx, AssignNodeGen.create(lhs, rhs));
         };
     }
 
@@ -176,7 +183,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             sort.assertVal(ctx);
 
             final LamaExpr value = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
-            return BinaryOperatorFactory.MinusFactory.create(new Constant(0), value);
+            return dbg(ctx, BinaryOperatorFactory.MinusFactory.create(new Constant(0), value));
         };
     }
 
@@ -193,7 +200,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final LamaExpr fun = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
             final LamaExpr[] args = exprListToArray(ctx.expr());
 
-            return new Call(fun, args);
+            return dbg(ctx, new Call(fun, args));
         };
     }
 
@@ -203,10 +210,12 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final LamaExpr value = visit(ctx.postfixExpr()).make(LamaExprSort.VAL);
             final LamaExpr index = visitExpr(ctx.expr()).make(LamaExprSort.VAL);
 
-            return switch (sort) {
+            final LamaExpr result = switch (sort) {
                 case VAL -> SubscriptNodeGen.create(value, index);
                 case REF -> SubscriptRefNodeGen.create(value, index);
             };
+
+            return dbg(ctx, result);
         };
     }
 
@@ -215,7 +224,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         return sort -> {
             sort.assertVal(ctx);
 
-            final LamaExpr fun = createName(ctx.LIDENT().getSymbol(), LamaExprSort.VAL);
+            final LamaExpr fun = dbg(ctx, createName(ctx.LIDENT().getSymbol(), LamaExprSort.VAL));
 
             final List<LamaParser.ExprContext> argsCtx = ctx.expr();
             final LamaExpr[] args = new LamaExpr[argsCtx.size() + 1];
@@ -225,7 +234,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 args[i] = visitExpr(argsCtx.get(i - 1)).make(LamaExprSort.VAL);
             }
 
-            return new Call(fun, args);
+            return dbg(ctx, new Call(fun, args));
         };
     }
 
@@ -233,7 +242,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprDecimal(LamaParser.PrimaryExprDecimalContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new Constant(Long.parseLong(ctx.DECIMAL().getText()));
+            return dbg(ctx, new Constant(Long.parseLong(ctx.DECIMAL().getText())));
         };
     }
 
@@ -241,7 +250,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprString(LamaParser.PrimaryExprStringContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new StringLiteral(convertStringLiteral(ctx.STRING().getText()));
+            return dbg(ctx, new StringLiteral(convertStringLiteral(ctx.STRING().getText())));
         };
     }
 
@@ -249,20 +258,20 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprChar(LamaParser.PrimaryExprCharContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new Constant(decodeCharLiteral(ctx.CHAR().getSymbol()));
+            return dbg(ctx, new Constant(decodeCharLiteral(ctx.CHAR().getSymbol())));
         };
     }
 
     @Override
     public LamaExprFactory visitPrimaryExprId(LamaParser.PrimaryExprIdContext ctx) {
-        return sort -> createName(ctx.LIDENT().getSymbol(), sort);
+        return sort -> dbg(ctx, createName(ctx.LIDENT().getSymbol(), sort));
     }
 
     @Override
     public LamaExprFactory visitPrimaryExprTrue(LamaParser.PrimaryExprTrueContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new Constant(1);
+            return dbg(ctx, new Constant(1));
         };
     }
 
@@ -270,7 +279,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprFalse(LamaParser.PrimaryExprFalseContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new Constant(0);
+            return dbg(ctx, new Constant(0));
         };
     }
 
@@ -278,7 +287,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprFun(LamaParser.PrimaryExprFunContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return createFun(ctx.funArgs(), ctx.scopeExpr(), null);
+            return dbg(ctx, createFun(ctx.funArgs(), ctx.scopeExpr(), null));
         };
     }
 
@@ -286,7 +295,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprSkip(LamaParser.PrimaryExprSkipContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new Constant(0);
+            return dbg(ctx, new Constant(0));
         };
     }
 
@@ -302,10 +311,10 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
             final List<LamaExpr> values = ctx.expr().stream().map(v -> visitExpr(v).make(LamaExprSort.VAL)).toList();
 
-            LamaExpr result = new Constant(0);
+            LamaExpr result = dbg(ctx, new Constant(0));
 
             for (int i = values.size() - 1; i >= 0; --i) {
-                result = new Sexp(LIST_TAG, new LamaExpr[] { values.get(i), result });
+                result = dbg(ctx, new Sexp(LIST_TAG, new LamaExpr[] { values.get(i), result }));
             }
 
             return result;
@@ -316,7 +325,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprArray(LamaParser.PrimaryExprArrayContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new Array(exprListToArray(ctx.expr()));
+            return dbg(ctx, new Array(exprListToArray(ctx.expr())));
         };
     }
 
@@ -324,7 +333,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     public LamaExprFactory visitPrimaryExprSexp(LamaParser.PrimaryExprSexpContext ctx) {
         return sort -> {
             sort.assertVal(ctx);
-            return new Sexp(ctx.UIDENT().getText(), exprListToArray(ctx.expr()));
+            return dbg(ctx, new Sexp(ctx.UIDENT().getText(), exprListToArray(ctx.expr())));
         };
     }
 
@@ -348,7 +357,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
             if (ctx.else_ == null) {
                 sort.assertVal(ctx);
-                result = new Constant(0);
+                result = dbg(ctx, new Constant(0));
             } else {
                 result = visitScopeExpr(ctx.else_).make(sort);
             }
@@ -356,7 +365,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             for (int i = branchesSize - 1; i >= 0; --i) {
                 final LamaExpr[] cb = branches.get(i);
 
-                result = new If(cb[0], cb[1], result);
+                result = dbg(ctx, new If(cb[0], cb[1], result));
             }
 
             return result;
@@ -371,7 +380,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
             final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
             final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
 
-            return new While(cond, body);
+            return dbg(ctx, new While(cond, body));
         };
     }
 
@@ -384,7 +393,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 final LamaExpr body = visitExpr(ctx.body.expr()).make(LamaExprSort.VAL);
                 final LamaExpr cond = visitExpr(ctx.cond).make(LamaExprSort.VAL);
 
-                return new Do(concat(result, body), cond);
+                return dbg(ctx, new Do(concat(result, body), cond));
             });
         };
     }
@@ -400,7 +409,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 final LamaExpr body = visitScopeExpr(ctx.body).make(LamaExprSort.VAL);
                 final LamaExpr post = visitExpr(ctx.post).make(LamaExprSort.VAL);
 
-                return concat(result, concat(init, new While(cond, concat(body, post))));
+                return dbg(ctx, concat(result, dbg(ctx, concat(init, dbg(ctx, new While(cond, concat(body, post)))))));
             });
         };
     }
@@ -433,7 +442,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 }
             }
 
-            return new Case(value, matchers, bodies);
+            return dbg(ctx, new Case(ctx.start.getLine(), ctx.start.getCharPositionInLine(), value, matchers, bodies));
         };
     }
 
@@ -457,7 +466,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
 
             LamaExpr result = null;
             for (final LamaParser.DefinitionContext def : scopeExpr.definition()) {
-                result = concat(result, visit(def).make(null));
+                result = dbg(scopeExpr, concat(result, visit(def).make(null)));
             }
 
             return block.apply(result);
@@ -490,6 +499,7 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
                 rootNode = new NamedRootNode(language, frameDescriptor, body, args.size(), name);
             }
 
+            rootNode.setSourceSection(createSourceSection(bodyCtx));
             return new Fun(rootNode.getCallTarget());
         } finally {
             currentScope = scope;
@@ -504,6 +514,17 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
         }
 
         return result;
+    }
+
+    private LamaExpr dbg(ParserRuleContext ctx, LamaExpr expr) {
+        expr.setSourceSection(createSourceSection(ctx));
+        return expr;
+    }
+
+    private SourceSection createSourceSection(ParserRuleContext ctx) {
+        final int start = ctx.start.getStartIndex();
+
+        return source.createSection(start, ctx.stop.getStopIndex() + 1 - start);
     }
 
     private static LamaExpr concat(LamaExpr lhs, LamaExpr rhs) {

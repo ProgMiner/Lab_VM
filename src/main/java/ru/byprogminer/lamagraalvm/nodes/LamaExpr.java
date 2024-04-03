@@ -8,6 +8,8 @@ import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.Node;
 import com.oracle.truffle.api.nodes.NodeInfo;
 import com.oracle.truffle.api.nodes.UnexpectedResultException;
+import com.oracle.truffle.api.source.SourceSection;
+import lombok.Setter;
 import ru.byprogminer.lamagraalvm.LamaLanguage;
 import ru.byprogminer.lamagraalvm.LamaTypes;
 import ru.byprogminer.lamagraalvm.LamaTypesGen;
@@ -18,8 +20,11 @@ import ru.byprogminer.lamagraalvm.runtime.*;
         language = LamaLanguage.NAME,
         description = "base expression node"
 )
+@Setter
 @TypeSystemReference(LamaTypes.class)
 public abstract class LamaExpr extends Node {
+
+    private SourceSection sourceSection;
 
     public long executeLong(VirtualFrame frame) throws UnexpectedResultException {
         return LamaTypesGen.expectLong(this.execute(frame));
@@ -45,14 +50,23 @@ public abstract class LamaExpr extends Node {
         return LamaTypesGen.expectLamaFun(this.execute(frame));
     }
 
+    @Override
+    public SourceSection getSourceSection() {
+        return sourceSection;
+    }
+
     public abstract Object execute(VirtualFrame frame);
+
+    protected LamaException exn(Throwable cause) {
+        return new LamaException(cause, this);
+    }
 
     protected static boolean executeCond(VirtualFrame frame, LamaExpr cond) {
         try {
             return cond.executeLong(frame) != 0;
         } catch (UnexpectedResultException e) {
             CompilerDirectives.transferToInterpreterAndInvalidate();
-            throw new IllegalArgumentException("condition must be integer");
+            throw cond.exn(new IllegalArgumentException("condition must be integer"));
         }
     }
 
