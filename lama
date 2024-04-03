@@ -1,10 +1,9 @@
 #!/usr/bin/env sh
 
 JAR=target/lama-graalvm-1.0-SNAPSHOT.jar
-MAIN=ru.byprogminer.lamagraalvm.Main
 
 # DEBUG='-Xdebug -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005'
 
 # TODO fix stack overflow
 
-"$JAVA_HOME/bin/java" -Xss2m $DEBUG -cp "$JAR" "-Dtruffle.class.path.append=$JAR" "$MAIN" "$@"
+"$JAVA_HOME/bin/java" -Xss2m $DEBUG "-Dtruffle.class.path.append=$JAR" -jar "$JAR" "$@"

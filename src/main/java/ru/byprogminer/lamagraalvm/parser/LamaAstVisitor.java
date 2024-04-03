@@ -517,6 +517,10 @@ public class LamaAstVisitor extends LamaBaseVisitor<LamaAstVisitor.LamaExprFacto
     }
 
     private LamaExpr dbg(ParserRuleContext ctx, LamaExpr expr) {
+        if (expr == null) {
+            return null;
+        }
+
         expr.setSourceSection(createSourceSection(ctx));
         return expr;
     }
