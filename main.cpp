@@ -14,13 +14,10 @@ std::optional<uint8_t> safe_read_uint8(const uint8_t * p) {
     }
 
     std::optional<uint8_t> result;
-    if (write(io[1], p, 1) < 1) {
-        goto ret;
+    if (write(io[1], p, 1) > 0) {
+        result = *p;
     }
 
-    result = *p;
-
-ret:
     close(io[0]);
     close(io[1]);
 
