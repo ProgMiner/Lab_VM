@@ -1,24 +1,42 @@
-#include <sys/mman.h>
-#include <unistd.h>
 #include <optional>
 #include <iostream>
 #include <sstream>
 #include <cstdint>
+#include <csignal>
+#include <csetjmp>
 
+
+static sigjmp_buf safe_read_uint8_env;
+
+static void safe_read_uint8_handler(int) {
+    siglongjmp(safe_read_uint8_env, 1);
+}
 
 std::optional<uint8_t> safe_read_uint8(const uint8_t * p) {
-    const std::size_t pagesize = sysconf(_SC_PAGESIZE);
+    // FIXME: add sigprocmask + pthread_sigmask to ensure thread-safety
 
-    void * const ps = reinterpret_cast<void *>(reinterpret_cast<std::size_t>(p) & -pagesize);
-    if (msync(ps, 1, MS_ASYNC) == 0) {
-        return *p;
+    struct sigaction old_sa;
+
+    struct sigaction sa {};
+    sa.sa_handler = safe_read_uint8_handler;
+    if (sigaction(SIGSEGV, &sa, &old_sa)) {
+        throw std::system_error { errno, std::system_category(), "unable to setup sigaction" };
     }
 
-    if (errno == ENOMEM) {
-        return std::nullopt;
+    std::optional<uint8_t> result;
+    if (!sigsetjmp(safe_read_uint8_env, SIGSEGV)) {
+        result = *p;
+    } else {
+        // ATTENTION: it seems like compiler optimizes construction of std::optional so we
+        //            actually dereferencing p AFTER non-empty std::optional was constructed
+        result = std::nullopt;
     }
 
-    throw std::system_error { errno, std::system_category(), "unable to msync" };
+    if (sigaction(SIGSEGV, &old_sa, nullptr)) {
+        throw std::system_error { errno, std::system_category(), "unable to restore sigaction" };
+    }
+
+    return result;
 }
 
 static void check(const uint8_t * p) {
@@ -45,6 +63,13 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    check(reinterpret_cast<const uint8_t *>(x));
+    check(reinterpret_cast<const uint8_t *>(x));
+    check(reinterpret_cast<const uint8_t *>(argv));
+    check(reinterpret_cast<const uint8_t *>(x));
+    check(reinterpret_cast<const uint8_t *>(x));
+    check(reinterpret_cast<const uint8_t *>(argv));
+    check(reinterpret_cast<const uint8_t *>(argv));
     check(reinterpret_cast<const uint8_t *>(x));
     check(reinterpret_cast<const uint8_t *>(argv));
 }
