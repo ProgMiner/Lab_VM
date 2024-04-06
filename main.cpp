@@ -7,28 +7,24 @@
 
 
 std::optional<uint8_t> safe_read_uint8(const uint8_t * p) {
-    const int pid = fork();
+    int io[2];
 
-    if (pid == 0) {
-        const volatile uint8_t x = *p;
-        (void) x;
-        exit(0);
+    if (pipe(io)) {
+        throw std::system_error { errno, std::system_category(), "unable to create pipe" };
     }
 
-    if (pid < 0) {
-        throw std::system_error { errno, std::system_category(), "unable to fork" };
+    std::optional<uint8_t> result;
+    if (write(io[1], p, 1) < 1) {
+        goto ret;
     }
 
-    int wstatus;
-    if (wait(&wstatus) < 0) {
-        throw std::system_error { errno, std::system_category(), "unable to wait fork" };
-    }
+    result = *p;
 
-    if (!WIFEXITED(wstatus)) {
-        return std::nullopt;
-    }
+ret:
+    close(io[0]);
+    close(io[1]);
 
-    return *p;
+    return result;
 }
 
 static void check(const uint8_t * p) {
