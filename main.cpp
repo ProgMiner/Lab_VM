@@ -1,4 +1,4 @@
-#include <sys/wait.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <optional>
 #include <iostream>
@@ -7,21 +7,18 @@
 
 
 std::optional<uint8_t> safe_read_uint8(const uint8_t * p) {
-    int io[2];
+    const std::size_t pagesize = sysconf(_SC_PAGESIZE);
 
-    if (pipe(io)) {
-        throw std::system_error { errno, std::system_category(), "unable to create pipe" };
+    void * const ps = reinterpret_cast<void *>(reinterpret_cast<std::size_t>(p) & -pagesize);
+    if (msync(ps, 1, MS_ASYNC) == 0) {
+        return *p;
     }
 
-    std::optional<uint8_t> result;
-    if (write(io[1], p, 1) > 0) {
-        result = *p;
+    if (errno == ENOMEM) {
+        return std::nullopt;
     }
 
-    close(io[0]);
-    close(io[1]);
-
-    return result;
+    throw std::system_error { errno, std::system_category(), "unable to msync" };
 }
 
 static void check(const uint8_t * p) {
