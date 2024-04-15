@@ -34,70 +34,45 @@ static uint64_t memory_usage(void) {
 
 #ifdef USE_POOL
 
-#include <sys/resource.h>
 #include <sys/mman.h>
 
 
 struct pool_t {
 
-    static constexpr const std::size_t INIT_ADDRESS = 0x7fffffff000;
-    static constexpr const std::size_t INIT_SIZE = 4096;
+    static constexpr const std::size_t INIT_SIZE = 40 * 4096;
 
-    void * address = nullptr;
+    uint8_t * address = nullptr;
 
 public:
 
     pool_t() {
-        fix_stack_limit();
-
-        void * const ptr = mmap(
-            reinterpret_cast<void*>(INIT_ADDRESS),
-            INIT_SIZE,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN | MAP_STACK,
-            -1,
-            0
-        );
+        void * const ptr = mmap(nullptr, INIT_SIZE, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN | MAP_STACK, -1, 0);
 
         if (ptr == MAP_FAILED) {
-            throw std::system_error { errno, std::system_category() };
+            throw std::system_error { errno, std::system_category(), "unable to mmap pool" };
         }
 
         std::cout << "mmap result: " << ptr << std::endl;
 
-        address = reinterpret_cast<uint8_t*>(ptr);
+        // if (mprotect(ptr, INIT_SIZE, PROT_READ | PROT_WRITE | PROT_GROWSDOWN)) {
+        //     throw std::system_error { errno, std::system_category(), "unable to configure pool" };
+        // }
+
+        address = reinterpret_cast<uint8_t*>(ptr) + INIT_SIZE;
     }
 
     void * alloc(std::size_t size) {
-        uint8_t * const ptr = reinterpret_cast<uint8_t*>(address);
+        void * const result = address -= size;
 
-        // std::cout << "allocated: " << reinterpret_cast<void*>(ptr) << std::endl;
-
-        address = ptr - size;
-        return ptr;
+        // std::cout << "allocated: " << result << std::endl;
+        return result;
     }
 
     template<typename T>
     T * alloc(void) {
         return reinterpret_cast<T*>(alloc(sizeof(T)));
     }
-
-private:
-
-    static void fix_stack_limit(void) {
-        struct rlimit stack_rlimit;
-
-        if (getrlimit(RLIMIT_STACK, &stack_rlimit)) {
-            throw std::system_error { errno, std::system_category(), "unable to get stack limit" };
-        }
-
-        stack_rlimit.rlim_cur = stack_rlimit.rlim_max;
-
-        if (setrlimit(RLIMIT_STACK, &stack_rlimit)) {
-            throw std::system_error { errno, std::system_category(), "unable to set stack limit" };
-        }
-    }
-
 } pool;
 
 #endif
