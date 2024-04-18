@@ -39,8 +39,10 @@ static uint64_t memory_usage(void) {
 
 struct pool_t {
 
-    static constexpr const std::size_t INIT_SIZE = 40 * 4096;
+    static constexpr const std::size_t PAGE_SIZE = 4096;
+    static constexpr const std::size_t INIT_SIZE = 40 * PAGE_SIZE;
 
+    uint8_t * start_address = nullptr;
     uint8_t * address = nullptr;
 
 public:
@@ -55,14 +57,22 @@ public:
 
         std::cout << "mmap result: " << ptr << std::endl;
 
-        // if (mprotect(ptr, INIT_SIZE, PROT_READ | PROT_WRITE | PROT_GROWSDOWN)) {
-        //     throw std::system_error { errno, std::system_category(), "unable to configure pool" };
-        // }
+        if (mprotect(ptr, INIT_SIZE, PROT_READ | PROT_WRITE | PROT_GROWSDOWN)) {
+            throw std::system_error { errno, std::system_category(), "unable to configure pool" };
+        }
 
-        address = reinterpret_cast<uint8_t*>(ptr) + INIT_SIZE;
+        address = start_address = reinterpret_cast<uint8_t*>(ptr) + INIT_SIZE;
     }
 
-    ~pool_t() = default; // TODO remove memory mapping
+    ~pool_t() noexcept(false) {
+        std::size_t addr = reinterpret_cast<std::size_t>(address);
+        addr = (addr / PAGE_SIZE) * PAGE_SIZE;
+
+        address = reinterpret_cast<uint8_t *>(addr);
+        if (munmap(address, start_address - address)) {
+            throw std::system_error { errno, std::system_category(), "unable to munmap pool" };
+        }
+    }
 
     void * alloc(std::size_t size) {
         void * const result = address -= size;
@@ -103,8 +113,13 @@ public:
 
     Graph(std::size_t n): nodes(n, nullptr) {}
 
+#ifdef USE_POOL
+
+    ~Graph() = default;
+
+#else
+
     ~Graph() noexcept {
-#ifndef USE_POOL
         for (const auto & node : nodes) {
             for (Edge * p = node; p; ) {
                 Edge * const next = p->next;
@@ -113,8 +128,9 @@ public:
                 p = next;
             }
         }
-#endif
     }
+
+#endif
 
     void connect(Edge * & from, std::size_t to) {
 #ifdef USE_POOL
