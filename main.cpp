@@ -62,6 +62,8 @@ public:
         address = reinterpret_cast<uint8_t*>(ptr) + INIT_SIZE;
     }
 
+    ~pool_t() = default; // TODO remove memory mapping
+
     void * alloc(std::size_t size) {
         void * const result = address -= size;
 
@@ -73,7 +75,7 @@ public:
     T * alloc(void) {
         return reinterpret_cast<T*>(alloc(sizeof(T)));
     }
-} pool;
+};
 
 #endif
 
@@ -85,51 +87,45 @@ struct Edge {
     Edge * next;
     std::size_t node_id;
 
-#ifdef USE_POOL
-
-    template<typename ... Args>
-    static Edge * create(Args && ... args) {
-        return new(pool.alloc<Edge>()) Edge { std::forward<Args>(args)... };
-    }
-
-    void destroy() noexcept {}
-
-#else
-
-    template<typename ... Args>
-    static Edge * create(Args && ... args) {
-        return new Edge { std::forward<Args>(args)... };
-    }
-
-    void destroy() noexcept {
-        delete this;
-    }
-
-#endif
-
 };
 
 class Graph {
 
     std::vector<Edge *> nodes;
 
+#ifdef USE_POOL
+
+    pool_t pool;
+
+#endif
+
 public:
 
     Graph(std::size_t n): nodes(n, nullptr) {}
 
     ~Graph() noexcept {
+#ifndef USE_POOL
         for (const auto & node : nodes) {
             for (Edge * p = node; p; ) {
                 Edge * const next = p->next;
 
-                p->destroy();
+                delete p;
                 p = next;
             }
         }
+#endif
     }
 
     void connect(Edge * & from, std::size_t to) {
-        from = Edge::create(from, to);
+#ifdef USE_POOL
+
+        from = new(pool.alloc<Edge>()) Edge { from, to };
+
+#else
+
+        from = new Edge { from, to };
+
+#endif
     }
 
     void connect(std::size_t from, std::size_t to) {
