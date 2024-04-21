@@ -40,28 +40,18 @@ static uint64_t memory_usage(void) {
 struct pool_t {
 
     static constexpr const std::size_t PAGE_SIZE = 4096;
-    static constexpr const std::size_t INIT_SIZE = 40 * PAGE_SIZE;
 
     uint8_t * start_address = nullptr;
     uint8_t * address = nullptr;
 
 public:
 
-    pool_t() {
-        void * const ptr = mmap(nullptr, INIT_SIZE, PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN | MAP_STACK, -1, 0);
+    pool_t(std::size_t pool_size) {
+        std::cerr << "pool size: " << pool_size << std::endl;
 
-        if (ptr == MAP_FAILED) {
-            throw std::system_error { errno, std::system_category(), "unable to mmap pool" };
-        }
+        address = start_address = allocate_pool(pool_size, PAGE_SIZE);
 
-        std::cout << "mmap result: " << ptr << std::endl;
-
-        if (mprotect(ptr, INIT_SIZE, PROT_READ | PROT_WRITE | PROT_GROWSDOWN)) {
-            throw std::system_error { errno, std::system_category(), "unable to configure pool" };
-        }
-
-        address = start_address = reinterpret_cast<uint8_t*>(ptr) + INIT_SIZE;
+        std::cerr << "pool start: " << reinterpret_cast<void *>(address) << std::endl;
     }
 
     ~pool_t() noexcept(false) {
@@ -70,20 +60,48 @@ public:
 
         address = reinterpret_cast<uint8_t *>(addr);
         if (munmap(address, start_address - address)) {
-            throw std::system_error { errno, std::system_category(), "unable to munmap pool" };
+            throw std::system_error { errno, std::system_category(), "unable to do munmap" };
         }
     }
 
     void * alloc(std::size_t size) {
         void * const result = address -= size;
 
-        // std::cout << "allocated: " << result << std::endl;
+        // std::cerr << "allocated: " << result << std::endl;
         return result;
     }
 
     template<typename T>
     T * alloc(void) {
         return reinterpret_cast<T*>(alloc(sizeof(T)));
+    }
+
+private:
+
+    // https://github.com/linux-test-project/ltp/blob/03333e6f8c2a7c9fa96fc5bdfbbaac0531aa750b/testcases/kernel/syscalls/mmap/mmap18.c
+
+    static uint8_t * allocate_pool(std::size_t pool_size, std::size_t initial_size) {
+	    const std::size_t reserved_size = 256 * PAGE_SIZE + pool_size;
+
+	    uint8_t * const start = reinterpret_cast<uint8_t *>(mmap(nullptr, reserved_size,
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+
+        if (start == MAP_FAILED) {
+            throw std::system_error { errno, std::system_category(), "unable to do mmap" };
+        }
+
+        std::cerr << "mmap result: " << reinterpret_cast<void *>(start) << std::endl;
+
+	    if (munmap(start, reserved_size)) {
+            throw std::system_error { errno, std::system_category(), "unable to do munmap" };
+        }
+
+	    if (mmap(start + reserved_size - initial_size, initial_size, PROT_READ | PROT_WRITE,
+	            MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0) == MAP_FAILED) {
+            throw std::system_error { errno, std::system_category(), "unable to do mmap" };
+        }
+
+	    return start + reserved_size;
     }
 };
 
@@ -111,7 +129,12 @@ class Graph {
 
 public:
 
-    Graph(std::size_t n): nodes(n, nullptr) {}
+    Graph(std::size_t n)
+        : nodes(n, nullptr)
+#ifdef USE_POOL
+        , pool(n * n * sizeof(Edge))
+#endif
+        {}
 
 #ifdef USE_POOL
 
